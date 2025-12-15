@@ -1,0 +1,268 @@
+from __future__ import annotations
+
+import json
+import os
+import stat
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from codex_orchestrator.contracts import ResolvedExecutionContract
+from codex_orchestrator.paths import OrchestratorPaths
+from codex_orchestrator.planner import RunDeck, RunDeckItem, ValidationResult, write_run_deck
+from codex_orchestrator.repo_execution import DiffCaps, RepoExecutionConfig, TickBudget, execute_repo_tick
+from codex_orchestrator.repo_inventory import RepoPolicy
+
+
+def _make_executable(path: Path) -> None:
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IXUSR)
+
+
+def _write_fake_bd(bin_dir: Path) -> None:
+    script = bin_dir / "bd"
+    script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "from __future__ import annotations",
+                "import json",
+                "import sys",
+                "from pathlib import Path",
+                "",
+                "DB = Path('.fake_beads.json')",
+                "",
+                "def load():",
+                "    return json.loads(DB.read_text(encoding='utf-8'))",
+                "",
+                "def save(data):",
+                "    DB.write_text(json.dumps(data, indent=2, sort_keys=True) + '\\n', encoding='utf-8')",
+                "",
+                "def main(argv):",
+                "    if len(argv) < 2:",
+                "        raise SystemExit(2)",
+                "    cmd = argv[1]",
+                "    if cmd == 'show':",
+                "        issue_id = argv[2]",
+                "        data = load()",
+                "        issue = data[issue_id]",
+                "        print(json.dumps(issue))",
+                "        return 0",
+                "    if cmd == 'update':",
+                "        issue_id = argv[2]",
+                "        args = argv[3:]",
+                "        status = None",
+                "        notes = None",
+                "        i = 0",
+                "        while i < len(args):",
+                "            if args[i] == '--status':",
+                "                status = args[i+1]",
+                "                i += 2",
+                "                continue",
+                "            if args[i] == '--notes':",
+                "                notes = args[i+1]",
+                "                i += 2",
+                "                continue",
+                "            if args[i] == '--json':",
+                "                i += 1",
+                "                continue",
+                "            i += 1",
+                "        data = load()",
+                "        issue = data[issue_id]",
+                "        if status is not None:",
+                "            issue['status'] = status",
+                "        if notes is not None:",
+                "            issue['notes'] = notes",
+                "        data[issue_id] = issue",
+                "        save(data)",
+                "        print(json.dumps(issue))",
+                "        return 0",
+                "    if cmd == 'close':",
+                "        issue_id = argv[2]",
+                "        data = load()",
+                "        issue = data[issue_id]",
+                "        issue['status'] = 'closed'",
+                "        data[issue_id] = issue",
+                "        save(data)",
+                "        print(json.dumps(issue))",
+                "        return 0",
+                "    if cmd == 'init':",
+                "        return 0",
+                "    raise SystemExit(1)",
+                "",
+                "if __name__ == '__main__':",
+                "    raise SystemExit(main(sys.argv))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _make_executable(script)
+
+
+def _write_fake_codex(bin_dir: Path) -> None:
+    script = bin_dir / "codex"
+    script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "from __future__ import annotations",
+                "import sys",
+                "from pathlib import Path",
+                "",
+                "def main(argv):",
+                "    # Minimal stub: read prompt from stdin and create a file to commit.",
+                "    _ = sys.stdin.read()",
+                "    Path('work.txt').write_text('hello\\n', encoding='utf-8')",
+                "    print('ok')",
+                "    return 0",
+                "",
+                "if __name__ == '__main__':",
+                "    raise SystemExit(main(sys.argv))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _make_executable(script)
+
+
+def _git(repo_root: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return (completed.stdout or "").strip()
+
+
+def test_execute_repo_tick_closes_bead_and_updates_dependents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _git(repo_root, "init", "-b", "main")
+    _git(repo_root, "config", "user.name", "Test")
+    _git(repo_root, "config", "user.email", "test@example.com")
+    (repo_root / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+    (repo_root / "test_dummy.py").write_text("def test_ok():\n    assert 1 + 1 == 2\n", encoding="utf-8")
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "init")
+
+    # Fake Beads issue database in the target repo.
+    (repo_root / ".fake_beads.json").write_text(
+        json.dumps(
+            {
+                "bd-1": {
+                    "id": "bd-1",
+                    "title": "Test bead",
+                    "status": "open",
+                    "notes": "",
+                    "dependencies": [],
+                    "dependents": [{"id": "bd-2"}],
+                },
+                "bd-2": {
+                    "id": "bd-2",
+                    "title": "Downstream bead",
+                    "status": "open",
+                    "notes": "",
+                    "dependencies": [{"id": "bd-1"}],
+                    "dependents": [],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", ".fake_beads.json")
+    _git(repo_root, "commit", "-m", "beads init")
+
+    cache_dir = tmp_path / "cache"
+    paths = OrchestratorPaths(cache_dir=cache_dir)
+    run_id = "20250101-000000-deadbeef"
+
+    contract = ResolvedExecutionContract(
+        time_budget_minutes=10,
+        validation_commands=("pytest -q",),
+        env="test",
+        allow_env_creation=False,
+        requires_notebook_execution=False,
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        notebook_roots=(Path("."),),
+        notebook_output_policy="strip",
+    )
+    baseline = ValidationResult(
+        command="pytest -q",
+        exit_code=0,
+        started_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        stdout="",
+        stderr="",
+    )
+    deck = RunDeck(
+        schema_version=2,
+        run_id=run_id,
+        repo_id="test_repo",
+        created_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        items=(
+            RunDeckItem(
+                bead_id="bd-1",
+                title="Test bead",
+                contract=contract,
+                baseline_validation=(baseline,),
+            ),
+        ),
+    )
+    write_run_deck(paths, deck=deck)
+
+    policy = RepoPolicy(
+        repo_id="test_repo",
+        path=repo_root,
+        base_branch="main",
+        env=None,
+        notebook_roots=(Path("."),),
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        validation_commands=("pytest -q",),
+        notebook_output_policy="strip",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_bd(bin_dir)
+    _write_fake_codex(bin_dir)
+
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=45))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=45),
+            min_minutes_to_start_new_bead=15,
+            max_beads_per_tick=3,
+            diff_caps=DiffCaps(max_files_changed=10, max_lines_added=100),
+        ),
+    )
+    assert result.skipped is False
+    assert result.beads_closed == 1
+    assert result.branch == f"run/{run_id}"
+
+    issues = json.loads((repo_root / ".fake_beads.json").read_text(encoding="utf-8"))
+    assert issues["bd-1"]["status"] == "closed"
+    assert "RUN_ID=20250101-000000-deadbeef" in issues["bd-1"]["notes"]
+    assert issues["bd-2"]["status"] == "open"
+    assert "Upstream bd-1 closed" in issues["bd-2"]["notes"]
+
+    message = _git(repo_root, "log", "-1", "--pretty=%B")
+    assert message.splitlines()[0] == "beads(bd-1): Test bead"
+    assert f"RUN_ID: {run_id}" in message
+

@@ -34,6 +34,10 @@ class OrchestratorPaths:
     def runs_dir(self) -> Path:
         return self.cache_dir / "runs"
 
+    @property
+    def repo_locks_dir(self) -> Path:
+        return self.cache_dir / "repo_locks"
+
     def run_dir(self, run_id: str) -> Path:
         return self.runs_dir / run_id
 
@@ -42,6 +46,9 @@ class OrchestratorPaths:
 
     def run_log_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "orchestrator.log"
+
+    def repo_lock_path(self, repo_id: str) -> Path:
+        return self.repo_locks_dir / f"{repo_id}.lock"
 
     def run_deck_path(self, run_id: str, repo_id: str, *, day: date | datetime) -> Path:
         if isinstance(day, datetime):
