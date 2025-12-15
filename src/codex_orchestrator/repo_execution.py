@@ -87,6 +87,7 @@ class RepoExecutionConfig:
     codex_output_limit_chars: int = 200_000
     validation_timeout_seconds: float = 900.0
     codex_timeout_padding: timedelta = timedelta(minutes=3)
+    replan: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,13 +617,13 @@ def execute_repo_tick(
             )
 
             try:
-                emit("planning_start", overlay_path=str(overlay_path))
+                emit("planning_start", overlay_path=str(overlay_path), replan=config.replan)
                 deck_plan = ensure_repo_run_deck(
                     paths=paths,
                     run_id=run_id,
                     repo_policy=repo_policy,
                     overlay_path=overlay_path,
-                    replan=False,
+                    replan=config.replan,
                     now=_now(),
                 )
                 deck_path = deck_plan.deck_path

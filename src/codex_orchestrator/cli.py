@@ -100,6 +100,7 @@ def _cmd_exec_repo(args: argparse.Namespace) -> int:
             max_files_changed=int(args.diff_cap_files),
             max_lines_added=int(args.diff_cap_lines),
         ),
+        replan=bool(args.replan),
     )
 
     result = execute_repo_tick(
@@ -417,6 +418,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1500,
         help="Per-tick max lines added (sum across beads).",
+    )
+    exec_repo_parser.add_argument(
+        "--replan",
+        action="store_true",
+        help="Recompute the run deck even if one already exists for this RUN_ID+repo_id.",
     )
     exec_repo_parser.set_defaults(func=_cmd_exec_repo)
 
