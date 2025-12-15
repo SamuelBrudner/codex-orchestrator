@@ -1,0 +1,19 @@
+# Contract overlay for `plume_grad_motion`.
+#
+# `[defaults]` applies to all beads unless overridden.
+# `[beads."<BEAD_ID>"]` defines per-bead overrides (keyed by Beads issue id).
+
+[defaults]
+# Per-bead time budget (required to be resolvable to queue work).
+time_budget_minutes = 45
+
+# Default validation gate. (May be extended per-bead.)
+validation_commands = ["pytest -q"]
+
+# Environment policy.
+env = "plume_grad_motion"
+allow_env_creation = false
+
+# Notebooks are executed only when explicitly required.
+requires_notebook_execution = false
+

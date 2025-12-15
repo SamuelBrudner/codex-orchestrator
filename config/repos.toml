@@ -1,0 +1,54 @@
+# Repository inventory for codex-orchestrator.
+#
+# Each repo is keyed by a stable `repo_id` under `[repos.<repo_id>]`.
+# Required fields: `path`, `base_branch`.
+# Optional fields: `env`, `notebook_roots`, `allowed_roots`, `deny_roots`,
+#                  `validation_commands`, `notebook_output_policy`.
+#
+# See `project_spec.md` for policy semantics and resolution order.
+
+[repos.plume_grad_motion]
+path = "/Users/samuelbrudner/Yale University Dropbox/Samuel Brudner/plumeGradMotion"
+base_branch = "main"
+env = "plume_grad_motion"
+notebook_roots = ["."]
+allowed_roots = ["."]
+deny_roots = [
+  ".benchmarks",
+  ".idea",
+  ".pytest_cache",
+  "__marimo__",
+  "__pycache__",
+  "data",
+  "datasets",
+  "executed_notebooks",
+  "figs",
+  "figures",
+  "logs",
+  "plumeGradMotion.egg-info",
+  "results",
+  "test_output",
+]
+validation_commands = ["pytest -q"]
+notebook_output_policy = "strip"
+
+[repos.centerline_prediction_agent_simulation]
+path = "/Users/samuelbrudner/Yale University Dropbox/users/sam_brudner/analysis/centerline_prediction_agent_simulation"
+base_branch = "main"
+env = "antenna_filter_navigation_sim"
+notebook_roots = ["."]
+allowed_roots = ["."]
+deny_roots = [
+  ".benchmarks",
+  ".idea",
+  ".pytest_cache",
+  ".ruff_cache",
+  "__marimo__",
+  "__pycache__",
+  "data",
+  "dense_models",
+  "models",
+  "reports",
+]
+validation_commands = ["pytest -q"]
+notebook_output_policy = "strip"

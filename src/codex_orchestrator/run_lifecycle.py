@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from codex_orchestrator.night_window import DEFAULT_NIGHT_WINDOW
+from codex_orchestrator.paths import OrchestratorPaths
+from codex_orchestrator.run_lock import RunLock, RunLockError
+from codex_orchestrator.run_state import CurrentRunState, RunMode, RunStateError
+
+
+class RunLifecycleError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class TickResult:
+    run_id: str | None
+    started_new: bool
+    ended: bool
+    end_reason: str | None
+    state: CurrentRunState | None
+
+
+def _generate_run_id(*, now: datetime) -> str:
+    now_utc = now.astimezone(timezone.utc)
+    ts = now_utc.strftime("%Y%m%d-%H%M%S")
+    return f"{ts}-{secrets.token_hex(4)}"
+
+
+def _read_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        delete=False,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    ) as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+        tmp_name = f.name
+    os.replace(tmp_name, path)
+
+
+def _load_current_run_state(*, path: Path, now: datetime) -> CurrentRunState | None:
+    try:
+        data = _read_json(path)
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as e:
+        raise RunLifecycleError(f"Failed to parse {path}: {e}") from e
+
+    state = CurrentRunState.from_json_dict(data)
+    if state.is_expired(now=now):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return None
+    return state
+
+
+def _ensure_run_artifacts(paths: OrchestratorPaths, *, state: CurrentRunState) -> None:
+    run_dir = paths.run_dir(state.run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata_path = paths.run_metadata_path(state.run_id)
+    if not metadata_path.exists():
+        _write_json_atomic(metadata_path, state.to_json_dict())
+
+    log_path = paths.run_log_path(state.run_id)
+    if not log_path.exists():
+        log_path.write_text("", encoding="utf-8")
+
+
+def _append_run_log(paths: OrchestratorPaths, *, run_id: str, message: str) -> None:
+    log_path = paths.run_log_path(run_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(message.rstrip("\n") + "\n")
+
+
+def _end_run(paths: OrchestratorPaths, *, state: CurrentRunState, now: datetime, reason: str) -> None:
+    end_path = paths.run_dir(state.run_id) / "run_end.json"
+    _write_json_atomic(
+        end_path,
+        {"run_id": state.run_id, "ended_at": now.isoformat(), "reason": reason},
+    )
+    try:
+        paths.current_run_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def tick_run(
+    *,
+    paths: OrchestratorPaths,
+    mode: RunMode,
+    actionable_work_found: bool = False,
+    idle_ticks_to_end: int = 3,
+    manual_ttl: timedelta = timedelta(hours=12),
+    now: datetime | None = None,
+) -> TickResult:
+    if now is None:
+        now = datetime.now().astimezone()
+    if now.tzinfo is None:
+        raise RunLifecycleError("tick_run requires a timezone-aware now datetime.")
+
+    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with RunLock(paths.run_lock_path):
+            state = _load_current_run_state(path=paths.current_run_path, now=now)
+
+            if state is not None and state.mode != mode:
+                try:
+                    paths.current_run_path.unlink()
+                except FileNotFoundError:
+                    pass
+                state = None
+
+            if state is not None:
+                end_reason = state.should_end(now=now, idle_ticks_to_end=idle_ticks_to_end)
+                if end_reason is not None:
+                    _append_run_log(
+                        paths,
+                        run_id=state.run_id,
+                        message=f"{now.isoformat()} end_run reason={end_reason}",
+                    )
+                    _end_run(paths, state=state, now=now, reason=end_reason)
+                    return TickResult(
+                        run_id=state.run_id,
+                        started_new=False,
+                        ended=True,
+                        end_reason=end_reason,
+                        state=None,
+                    )
+
+            started_new = False
+            if state is None:
+                started_new = True
+                run_id = _generate_run_id(now=now)
+                window_end_at = DEFAULT_NIGHT_WINDOW.end_for(now) if mode == "automated" else None
+                expires_at = window_end_at if window_end_at is not None else now + manual_ttl
+                state = CurrentRunState(
+                    schema_version=1,
+                    run_id=run_id,
+                    mode=mode,
+                    created_at=now,
+                    last_tick_at=now,
+                    expires_at=expires_at,
+                    window_end_at=window_end_at,
+                    tick_count=0,
+                    consecutive_idle_ticks=0,
+                )
+
+            state = state.on_tick(
+                now=now,
+                actionable_work_found=actionable_work_found,
+                idle_ticks_to_end=idle_ticks_to_end,
+                manual_ttl=manual_ttl,
+            )
+
+            _ensure_run_artifacts(paths, state=state)
+            _write_json_atomic(paths.current_run_path, state.to_json_dict())
+            _append_run_log(
+                paths,
+                run_id=state.run_id,
+                message=(
+                    f"{now.isoformat()} tick={state.tick_count} mode={state.mode} "
+                    f"actionable_work_found={actionable_work_found} "
+                    f"consecutive_idle_ticks={state.consecutive_idle_ticks}"
+                ),
+            )
+
+            end_reason = state.should_end(now=now, idle_ticks_to_end=idle_ticks_to_end)
+            if end_reason is not None:
+                _append_run_log(
+                    paths,
+                    run_id=state.run_id,
+                    message=f"{now.isoformat()} end_run reason={end_reason}",
+                )
+                _end_run(paths, state=state, now=now, reason=end_reason)
+                return TickResult(
+                    run_id=state.run_id,
+                    started_new=started_new,
+                    ended=True,
+                    end_reason=end_reason,
+                    state=None,
+                )
+
+            return TickResult(
+                run_id=state.run_id,
+                started_new=started_new,
+                ended=False,
+                end_reason=None,
+                state=state,
+            )
+    except RunLockError as e:
+        raise RunLifecycleError(str(e)) from e
+    except RunStateError as e:
+        raise RunLifecycleError(str(e)) from e
+
