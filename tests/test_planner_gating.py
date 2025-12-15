@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 from codex_orchestrator.paths import OrchestratorPaths
-from codex_orchestrator.planner import ReadyBead, build_run_deck, plan_deck_items, write_run_deck
+from codex_orchestrator.planner import (
+    ReadyBead,
+    ValidationResult,
+    build_run_deck,
+    plan_deck_items,
+    read_run_deck,
+    write_run_deck,
+)
 from codex_orchestrator.repo_inventory import RepoPolicy
 
 
@@ -92,7 +98,21 @@ def test_planner_writes_deck_items_with_resolved_contract_snapshot(tmp_path: Pat
     assert len(planning.deck_items) == 1
 
     now = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-    deck = build_run_deck(run_id="run-123", repo_policy=policy, planning=planning, now=now)
+    baseline = ValidationResult(
+        command="pytest -q",
+        exit_code=0,
+        started_at=now,
+        finished_at=now,
+        stdout="",
+        stderr="",
+    )
+    deck = build_run_deck(
+        run_id="run-123",
+        repo_policy=policy,
+        planning=planning,
+        baseline_results_by_command={"pytest -q": baseline},
+        now=now,
+    )
     deck_json = deck.to_json_dict()
 
     assert deck_json["run_id"] == "run-123"
@@ -101,11 +121,13 @@ def test_planner_writes_deck_items_with_resolved_contract_snapshot(tmp_path: Pat
     assert deck_json["items"][0]["bead_id"] == "bd-1"
     assert deck_json["items"][0]["title"] == "My bead"
     assert deck_json["items"][0]["contract"]["env"] == "default_env"
+    assert deck_json["items"][0]["baseline_validation"][0]["command"] == "pytest -q"
+    assert deck_json["items"][0]["baseline_validation"][0]["ok"] is True
 
     paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
     out_path = write_run_deck(paths, deck=deck)
     assert out_path.exists()
 
-    written = json.loads(out_path.read_text(encoding="utf-8"))
-    assert written["items"][0]["contract"]["env"] == "default_env"
-
+    written = read_run_deck(out_path)
+    assert written.items[0].contract.env == "default_env"
+    assert written.items[0].baseline_validation[0].command == "pytest -q"

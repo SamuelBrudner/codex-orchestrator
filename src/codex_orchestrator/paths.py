@@ -48,3 +48,8 @@ class OrchestratorPaths:
             day = day.date()
         date_str = day.strftime("%Y-%m-%d")
         return self.run_dir(run_id) / f"{repo_id}.deck.{date_str}.json"
+
+    def find_existing_run_deck_path(self, run_id: str, repo_id: str) -> Path | None:
+        pattern = f"{repo_id}.deck.*.json"
+        candidates = sorted(self.run_dir(run_id).glob(pattern))
+        return candidates[0] if candidates else None
