@@ -47,8 +47,26 @@ class OrchestratorPaths:
     def run_log_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "orchestrator.log"
 
+    def run_summary_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / "run_summary.json"
+
     def repo_lock_path(self, repo_id: str) -> Path:
         return self.repo_locks_dir / f"{repo_id}.lock"
+
+    def repo_exec_log_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.exec.log"
+
+    def repo_stdout_log_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.stdout.log"
+
+    def repo_stderr_log_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.stderr.log"
+
+    def repo_events_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.events.jsonl"
+
+    def repo_summary_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.summary.json"
 
     def run_deck_path(self, run_id: str, repo_id: str, *, day: date | datetime) -> Path:
         if isinstance(day, datetime):

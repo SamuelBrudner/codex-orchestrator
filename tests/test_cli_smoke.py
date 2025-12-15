@@ -18,3 +18,17 @@ def test_cli_help_runs() -> None:
         env=env,
     )
     assert result.returncode == 0
+
+
+def test_status_cli_help_runs() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-m", "codex_orchestrator.status_cli", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0

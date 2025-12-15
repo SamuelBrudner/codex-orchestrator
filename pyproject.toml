@@ -20,6 +20,7 @@ dev = [
 
 [project.scripts]
 codex-orchestrator = "codex_orchestrator.cli:main"
+codex-status = "codex_orchestrator.status_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -36,4 +37,3 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-

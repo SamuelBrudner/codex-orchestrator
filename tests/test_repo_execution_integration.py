@@ -256,6 +256,13 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(tmp_path: Path, mo
     assert result.beads_closed == 1
     assert result.branch == f"run/{run_id}"
 
+    assert paths.repo_summary_path(run_id, "test_repo").exists()
+    assert paths.repo_stdout_log_path(run_id, "test_repo").exists()
+    assert paths.repo_stderr_log_path(run_id, "test_repo").exists()
+    assert paths.repo_events_path(run_id, "test_repo").exists()
+    assert paths.run_summary_path(run_id).exists()
+    assert (repo_root / "docs" / "runs" / f"{run_id}.md").exists()
+
     issues = json.loads((repo_root / ".fake_beads.json").read_text(encoding="utf-8"))
     assert issues["bd-1"]["status"] == "closed"
     assert "RUN_ID=20250101-000000-deadbeef" in issues["bd-1"]["notes"]
@@ -265,4 +272,3 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(tmp_path: Path, mo
     message = _git(repo_root, "log", "-1", "--pretty=%B")
     assert message.splitlines()[0] == "beads(bd-1): Test bead"
     assert f"RUN_ID: {run_id}" in message
-
