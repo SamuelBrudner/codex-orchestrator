@@ -89,6 +89,8 @@ def format_repo_run_report_md(
     repo_id: str,
     run_id: str,
     branch: str | None,
+    ai_settings: Mapping[str, str] | None,
+    codex_command: str | None,
     beads: list[Mapping[str, Any]],
     planning_skipped: list[Mapping[str, Any]],
     notebook_refactors: Mapping[str, list[str]],
@@ -119,6 +121,18 @@ def format_repo_run_report_md(
     lines.append("## Run")
     lines.append(f"- RUN_ID: `{run_id}`")
     lines.append(f"- Branch: `{branch_display}`")
+    lines.append("")
+
+    lines.append("## AI Configuration")
+    if ai_settings is None:
+        lines.append("- <unavailable>")
+    else:
+        model = ai_settings.get("model", "<unknown>")
+        reasoning_effort = ai_settings.get("reasoning_effort", "<unknown>")
+        lines.append(f"- Model: `{model}`")
+        lines.append(f"- Reasoning effort: `{reasoning_effort}`")
+    if codex_command:
+        lines.append(f"- Codex invocation: `{codex_command}`")
     lines.append("")
 
     lines.append("## Beads Issues Worked")
@@ -199,4 +213,3 @@ def write_repo_run_report(*, repo_root: Path, run_id: str, content: str) -> Path
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(content, encoding="utf-8")
     return report_path
-

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from codex_orchestrator import __version__
+from codex_orchestrator.ai_policy import AiPolicyError, AiSettings, enforce_unattended_ai_policy, load_ai_settings
 from codex_orchestrator.beads_subprocess import BdCliError, bd_init, bd_list_ids, bd_ready
 from codex_orchestrator.contract_overlays import (
     ContractOverlay,
@@ -26,7 +27,18 @@ from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_invento
 from codex_orchestrator.run_lifecycle import RunLifecycleError, tick_run
 
 
+def _load_enforced_ai_settings() -> AiSettings:
+    config_path = Path("config/orchestrator.toml")
+    try:
+        settings = load_ai_settings(config_path)
+        enforce_unattended_ai_policy(settings, config_path=config_path)
+    except AiPolicyError as e:
+        raise SystemExit(f"codex-orchestrator: {e}") from e
+    return settings
+
+
 def _cmd_tick(args: argparse.Namespace) -> int:
+    _load_enforced_ai_settings()
     cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else default_cache_dir()
     paths = OrchestratorPaths(cache_dir=cache_dir)
     try:
@@ -70,6 +82,7 @@ def _load_current_run_id(paths: OrchestratorPaths) -> str:
 
 
 def _cmd_exec_repo(args: argparse.Namespace) -> int:
+    ai_settings = _load_enforced_ai_settings()
     cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else default_cache_dir()
     paths = OrchestratorPaths(cache_dir=cache_dir)
     run_id = str(args.run_id) if args.run_id else _load_current_run_id(paths)
@@ -101,6 +114,7 @@ def _cmd_exec_repo(args: argparse.Namespace) -> int:
             max_lines_added=int(args.diff_cap_lines),
         ),
         replan=bool(args.replan),
+        ai_settings=ai_settings,
     )
 
     result = execute_repo_tick(

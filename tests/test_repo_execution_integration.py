@@ -108,10 +108,12 @@ def _write_fake_codex(bin_dir: Path) -> None:
             [
                 "#!/usr/bin/env python3",
                 "from __future__ import annotations",
+                "import json",
                 "import sys",
                 "from pathlib import Path",
                 "",
                 "def main(argv):",
+                "    Path('.fake_codex_argv.json').write_text(json.dumps(argv) + '\\n', encoding='utf-8')",
                 "    # Minimal stub: read prompt from stdin and create a file to commit.",
                 "    _ = sys.stdin.read()",
                 "    Path('work.txt').write_text('hello\\n', encoding='utf-8')",
@@ -262,6 +264,19 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(tmp_path: Path, mo
     assert paths.repo_events_path(run_id, "test_repo").exists()
     assert paths.run_summary_path(run_id).exists()
     assert (repo_root / "docs" / "runs" / f"{run_id}.md").exists()
+
+    codex_argv = json.loads((repo_root / ".fake_codex_argv.json").read_text(encoding="utf-8"))
+    assert "--full-auto" in codex_argv
+    assert "--model" in codex_argv
+    assert codex_argv[codex_argv.index("--model") + 1] == "gpt-5.2"
+    assert "-c" in codex_argv
+    assert codex_argv[codex_argv.index("-c") + 1] == 'reasoning_effort="xhigh"'
+
+    report_text = (repo_root / "docs" / "runs" / f"{run_id}.md").read_text(encoding="utf-8")
+    assert "## AI Configuration" in report_text
+    assert "- Model: `gpt-5.2`" in report_text
+    assert "- Reasoning effort: `xhigh`" in report_text
+    assert "reasoning_effort=\"xhigh\"" in report_text
 
     issues = json.loads((repo_root / ".fake_beads.json").read_text(encoding="utf-8"))
     assert issues["bd-1"]["status"] == "closed"

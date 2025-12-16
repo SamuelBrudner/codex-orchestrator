@@ -9,6 +9,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
+from codex_orchestrator.ai_policy import (
+    AiSettings,
+    REQUIRED_CODEX_MODEL,
+    REQUIRED_REASONING_EFFORT,
+    codex_cli_args_for_settings,
+)
 from codex_orchestrator.audit_trail import (
     append_jsonl,
     collect_tool_versions,
@@ -88,6 +94,10 @@ class RepoExecutionConfig:
     validation_timeout_seconds: float = 900.0
     codex_timeout_padding: timedelta = timedelta(minutes=3)
     replan: bool = False
+    ai_settings: AiSettings = AiSettings(
+        model=REQUIRED_CODEX_MODEL,
+        reasoning_effort=REQUIRED_REASONING_EFFORT,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,10 +471,20 @@ def execute_repo_tick(
             {"command": cmd, "status": status}
             for cmd, status in sorted(validation_status_by_command.items())
         ]
+        codex_command = shlex.join(
+            (
+                "codex",
+                "exec",
+                "--full-auto",
+                *codex_cli_args_for_settings(config.ai_settings),
+            )
+        )
         content = format_repo_run_report_md(
             repo_id=repo_policy.repo_id,
             run_id=run_id,
             branch=branch,
+            ai_settings=config.ai_settings.to_json_dict(),
+            codex_command=codex_command,
             beads=bead_audits,
             planning_skipped=planning_skipped,
             notebook_refactors=notebook_refactors,
@@ -491,6 +511,12 @@ def execute_repo_tick(
             stop_reason=result.stop_reason,
             bead_audits=bead_audits,
         )
+        codex_argv = (
+            "codex",
+            "exec",
+            "--full-auto",
+            *codex_cli_args_for_settings(config.ai_settings),
+        )
         summary = {
             "schema_version": 1,
             "run_id": run_id,
@@ -509,6 +535,9 @@ def execute_repo_tick(
             "planning_skipped_beads": planning_skipped,
             "failures": repo_failures,
             "follow_ups": follow_ups,
+            "ai_settings": config.ai_settings.to_json_dict(),
+            "codex_command": shlex.join(codex_argv),
+            "codex_argv": list(codex_argv),
             "tool_versions": tool_versions,
             "next_action": next_action,
         }
@@ -771,13 +800,25 @@ def execute_repo_tick(
                     log_path,
                     f"{_now().isoformat()} codex_start bead_id={item.bead_id} timeout={timeout_seconds:.0f}s",
                 )
+                codex_argv = (
+                    "codex",
+                    "exec",
+                    "--full-auto",
+                    *codex_cli_args_for_settings(config.ai_settings),
+                )
                 emit("bead_start", bead_id=item.bead_id, title=item.title)
-                emit("codex_start", bead_id=item.bead_id, timeout_seconds=timeout_seconds)
+                emit(
+                    "codex_start",
+                    bead_id=item.bead_id,
+                    timeout_seconds=timeout_seconds,
+                    argv=list(codex_argv),
+                )
                 try:
                     codex_invocation = codex_exec_full_auto(
                         prompt=codex_prompt,
                         cwd=repo_policy.path,
                         timeout_seconds=timeout_seconds,
+                        extra_args=codex_cli_args_for_settings(config.ai_settings),
                         output_limit_chars=config.codex_output_limit_chars,
                     )
                 except CodexCliError as e:
@@ -804,7 +845,12 @@ def execute_repo_tick(
                         }
                     )
                     repo_failures.append(f"codex failed for {item.bead_id}: {e}")
-                    emit("codex_failed", bead_id=item.bead_id, error=str(e))
+                    emit(
+                        "codex_failed",
+                        bead_id=item.bead_id,
+                        error=str(e),
+                        argv=list(codex_argv),
+                    )
                     stop_reason = "error"
                     was_clean_before_report = not git_is_dirty(repo_root=repo_policy.path)
                     maybe_write_repo_report(branch=run_branch)
@@ -831,6 +877,7 @@ def execute_repo_tick(
                     exit_code=codex_invocation.exit_code,
                     started_at=codex_invocation.started_at.isoformat(),
                     finished_at=codex_invocation.finished_at.isoformat(),
+                    argv=list(codex_invocation.args),
                 )
                 _append_log(log_path, codex_invocation.stdout)
                 _append_log(
