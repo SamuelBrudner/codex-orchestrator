@@ -75,3 +75,14 @@ def test_automated_run_ends_at_window_end(tmp_path: Path) -> None:
     assert r1.ended is True
     assert not paths.current_run_path.exists()
 
+
+def test_automated_tick_outside_window_does_not_start_run(tmp_path: Path) -> None:
+    paths = OrchestratorPaths(cache_dir=tmp_path)
+    now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    result = tick_run(paths=paths, mode="automated", now=now, idle_ticks_to_end=10)
+    assert result.ended is True
+    assert result.run_id is None
+    assert result.end_reason == "outside_window"
+    assert not paths.current_run_path.exists()
+    assert not paths.runs_dir.exists()

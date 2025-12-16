@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,6 +25,7 @@ from codex_orchestrator.repo_execution import (
     execute_repo_tick,
 )
 from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
+from codex_orchestrator.orchestrator_cycle import OrchestratorCycleError, run_orchestrator_cycle
 from codex_orchestrator.run_lifecycle import RunLifecycleError, tick_run
 
 
@@ -53,7 +55,10 @@ def _cmd_tick(args: argparse.Namespace) -> int:
         raise SystemExit(f"codex-orchestrator: {e}") from e
 
     if result.ended:
-        print(f"RUN_ID={result.run_id} status=ended reason={result.end_reason}")
+        if result.run_id is None:
+            print(f"status=skipped reason={result.end_reason}")
+        else:
+            print(f"RUN_ID={result.run_id} status=ended reason={result.end_reason}")
     else:
         tick_count = result.state.tick_count if result.state is not None else "?"
         print(
@@ -133,6 +138,72 @@ def _cmd_exec_repo(args: argparse.Namespace) -> int:
             f"repo_id={repo_id} status=ok closed={result.beads_closed} "
             f"attempted={result.beads_attempted} stop_reason={result.stop_reason}"
         )
+    return 0
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    ai_settings = _load_enforced_ai_settings()
+    cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else default_cache_dir()
+
+    max_parallel: int
+    if args.max_parallel is not None:
+        max_parallel = int(args.max_parallel)
+    else:
+        raw = os.environ.get("MAX_PARALLEL", "1")
+        try:
+            max_parallel = int(raw)
+        except ValueError as e:
+            raise SystemExit(f"codex-orchestrator: invalid MAX_PARALLEL={raw!r} (expected int)") from e
+
+    try:
+        result = run_orchestrator_cycle(
+            cache_dir=cache_dir,
+            mode=args.mode,
+            ai_settings=ai_settings,
+            repo_config_path=Path("config/repos.toml"),
+            overlays_dir=Path("config/bead_contracts"),
+            repo_ids=args.repo_id,
+            repo_groups=args.repo_group,
+            max_parallel=max_parallel,
+            tick_minutes=float(args.tick_minutes),
+            idle_ticks_to_end=int(args.idle_ticks_to_end),
+            manual_ttl_hours=float(args.manual_ttl_hours),
+            min_minutes_to_start_new_bead=int(args.min_minutes_to_start_new_bead),
+            max_beads_per_tick=int(args.max_beads_per_tick),
+            diff_cap_files=int(args.diff_cap_files),
+            diff_cap_lines=int(args.diff_cap_lines),
+            replan=bool(args.replan),
+        )
+    except (OrchestratorCycleError, RunLifecycleError) as e:
+        raise SystemExit(f"codex-orchestrator: {e}") from e
+
+    ensure = result.ensure_result
+    if ensure.ended:
+        if ensure.run_id is None:
+            print(f"status=skipped reason={ensure.end_reason}")
+        else:
+            print(f"RUN_ID={ensure.run_id} status=ended reason={ensure.end_reason}")
+        return 0
+
+    run_id = ensure.run_id
+    assert run_id is not None
+    tick_result = result.tick_result
+    assert tick_result is not None
+
+    if tick_result.ended:
+        print(f"RUN_ID={run_id} status=ended reason={tick_result.end_reason}")
+    else:
+        tick_count = tick_result.state.tick_count if tick_result.state is not None else "?"
+        print(f"RUN_ID={run_id} status=active tick={tick_count} started_new={ensure.started_new}")
+
+    for repo_result in result.repo_results:
+        if repo_result.skipped:
+            print(f"repo_id={repo_result.repo_id} status=skipped reason={repo_result.skip_reason}")
+        else:
+            print(
+                f"repo_id={repo_result.repo_id} status=ok attempted={repo_result.beads_attempted} "
+                f"closed={repo_result.beads_closed} stop_reason={repo_result.stop_reason}"
+            )
     return 0
 
 
@@ -403,6 +474,76 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Record that actionable work was found this tick (resets idle counter).",
     )
     tick_parser.set_defaults(func=_cmd_tick)
+
+    run_parser = subparsers.add_parser("run", help="Execute one orchestrator cycle (all repos).")
+    run_parser.add_argument(
+        "--mode",
+        choices=("automated", "manual"),
+        default="automated",
+        help="Run mode (scheduler=automated, roadtrip=manual).",
+    )
+    run_parser.add_argument("--cache-dir", default=None, help="Override orchestrator cache directory.")
+    run_parser.add_argument(
+        "--repo-id",
+        action="append",
+        default=None,
+        help="Restrict to a specific repo_id from config/repos.toml (repeatable).",
+    )
+    run_parser.add_argument(
+        "--repo-group",
+        action="append",
+        default=None,
+        help="Restrict to a repo_group from config/repos.toml (repeatable).",
+    )
+    run_parser.add_argument(
+        "--max-parallel",
+        type=int,
+        default=None,
+        help="Max repos to run in parallel (defaults to $MAX_PARALLEL or 1).",
+    )
+    run_parser.add_argument("--tick-minutes", type=float, default=45.0, help="Tick budget in minutes.")
+    run_parser.add_argument(
+        "--idle-ticks-to-end",
+        type=int,
+        default=3,
+        help="End the run after N consecutive idle ticks.",
+    )
+    run_parser.add_argument(
+        "--manual-ttl-hours",
+        type=float,
+        default=12.0,
+        help="Expiry TTL for manual runs (hours).",
+    )
+    run_parser.add_argument(
+        "--min-minutes-to-start-new-bead",
+        type=int,
+        default=15,
+        help="Do not start new beads if less than this remains.",
+    )
+    run_parser.add_argument(
+        "--max-beads-per-tick",
+        type=int,
+        default=3,
+        help="Cap beads attempted per repo per tick.",
+    )
+    run_parser.add_argument(
+        "--diff-cap-files",
+        type=int,
+        default=25,
+        help="Per-tick max files changed (sum across beads).",
+    )
+    run_parser.add_argument(
+        "--diff-cap-lines",
+        type=int,
+        default=1500,
+        help="Per-tick max lines added (sum across beads).",
+    )
+    run_parser.add_argument(
+        "--replan",
+        action="store_true",
+        help="Recompute each repo run deck even if one already exists for this RUN_ID+repo_id.",
+    )
+    run_parser.set_defaults(func=_cmd_run)
 
     exec_repo_parser = subparsers.add_parser("exec-repo", help="Execute one repo deck tick.")
     exec_repo_parser.add_argument("--repo-id", required=True, help="Repo ID from config/repos.toml")

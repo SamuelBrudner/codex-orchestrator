@@ -21,6 +21,7 @@ dev = [
 [project.scripts]
 codex-orchestrator = "codex_orchestrator.cli:main"
 codex-status = "codex_orchestrator.status_cli:main"
+codex-roadtrip = "codex_orchestrator.roadtrip_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

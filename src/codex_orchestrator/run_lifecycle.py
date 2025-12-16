@@ -105,6 +105,120 @@ def _end_run(paths: OrchestratorPaths, *, state: CurrentRunState, now: datetime,
         pass
 
 
+def _require_held_run_lock(paths: OrchestratorPaths, *, run_lock: RunLock) -> None:
+    if run_lock._handle is None:  # pyright: ignore[reportPrivateUsage]
+        raise RunLifecycleError("run_lock must be acquired before calling this function.")
+    if run_lock.lock_path.resolve() != paths.run_lock_path.resolve():
+        raise RunLifecycleError(
+            f"run_lock path mismatch: expected {paths.run_lock_path}, got {run_lock.lock_path}"
+        )
+
+
+def _tick_run_locked(
+    *,
+    paths: OrchestratorPaths,
+    mode: RunMode,
+    actionable_work_found: bool,
+    idle_ticks_to_end: int,
+    manual_ttl: timedelta,
+    now: datetime,
+) -> TickResult:
+    state = _load_current_run_state(path=paths.current_run_path, now=now)
+
+    if state is not None and state.mode != mode:
+        try:
+            paths.current_run_path.unlink()
+        except FileNotFoundError:
+            pass
+        state = None
+
+    if state is not None:
+        end_reason = state.should_end(now=now, idle_ticks_to_end=idle_ticks_to_end)
+        if end_reason is not None:
+            _append_run_log(
+                paths,
+                run_id=state.run_id,
+                message=f"{now.isoformat()} end_run reason={end_reason}",
+            )
+            _end_run(paths, state=state, now=now, reason=end_reason)
+            return TickResult(
+                run_id=state.run_id,
+                started_new=False,
+                ended=True,
+                end_reason=end_reason,
+                state=None,
+            )
+
+    started_new = False
+    if state is None:
+        if mode == "automated" and not DEFAULT_NIGHT_WINDOW.contains(now):
+            return TickResult(
+                run_id=None,
+                started_new=False,
+                ended=True,
+                end_reason="outside_window",
+                state=None,
+            )
+        started_new = True
+        run_id = _generate_run_id(now=now)
+        window_end_at = DEFAULT_NIGHT_WINDOW.end_for(now) if mode == "automated" else None
+        expires_at = window_end_at if window_end_at is not None else now + manual_ttl
+        state = CurrentRunState(
+            schema_version=1,
+            run_id=run_id,
+            mode=mode,
+            created_at=now,
+            last_tick_at=now,
+            expires_at=expires_at,
+            window_end_at=window_end_at,
+            tick_count=0,
+            consecutive_idle_ticks=0,
+        )
+
+    state = state.on_tick(
+        now=now,
+        actionable_work_found=actionable_work_found,
+        idle_ticks_to_end=idle_ticks_to_end,
+        manual_ttl=manual_ttl,
+    )
+
+    _ensure_run_artifacts(paths, state=state)
+    _write_json_atomic(paths.current_run_path, state.to_json_dict())
+    _append_run_log(
+        paths,
+        run_id=state.run_id,
+        message=(
+            f"{now.isoformat()} tick={state.tick_count} mode={state.mode} "
+            f"actionable_work_found={actionable_work_found} "
+            f"consecutive_idle_ticks={state.consecutive_idle_ticks}"
+        ),
+    )
+
+    end_reason = state.should_end(now=now, idle_ticks_to_end=idle_ticks_to_end)
+    if end_reason is not None:
+        _append_run_log(
+            paths,
+            run_id=state.run_id,
+            message=f"{now.isoformat()} end_run reason={end_reason}",
+        )
+        _end_run(paths, state=state, now=now, reason=end_reason)
+        return TickResult(
+            run_id=state.run_id,
+            started_new=started_new,
+            ended=True,
+            end_reason=end_reason,
+            state=None,
+        )
+
+    return TickResult(
+        run_id=state.run_id,
+        started_new=started_new,
+        ended=False,
+        end_reason=None,
+        state=state,
+    )
+
+
 def tick_run(
     *,
     paths: OrchestratorPaths,
@@ -113,6 +227,7 @@ def tick_run(
     idle_ticks_to_end: int = 3,
     manual_ttl: timedelta = timedelta(hours=12),
     now: datetime | None = None,
+    run_lock: RunLock | None = None,
 ) -> TickResult:
     if now is None:
         now = datetime.now().astimezone()
@@ -122,70 +237,59 @@ def tick_run(
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        with RunLock(paths.run_lock_path):
-            state = _load_current_run_state(path=paths.current_run_path, now=now)
-
-            if state is not None and state.mode != mode:
-                try:
-                    paths.current_run_path.unlink()
-                except FileNotFoundError:
-                    pass
-                state = None
-
-            if state is not None:
-                end_reason = state.should_end(now=now, idle_ticks_to_end=idle_ticks_to_end)
-                if end_reason is not None:
-                    _append_run_log(
-                        paths,
-                        run_id=state.run_id,
-                        message=f"{now.isoformat()} end_run reason={end_reason}",
-                    )
-                    _end_run(paths, state=state, now=now, reason=end_reason)
-                    return TickResult(
-                        run_id=state.run_id,
-                        started_new=False,
-                        ended=True,
-                        end_reason=end_reason,
-                        state=None,
-                    )
-
-            started_new = False
-            if state is None:
-                started_new = True
-                run_id = _generate_run_id(now=now)
-                window_end_at = DEFAULT_NIGHT_WINDOW.end_for(now) if mode == "automated" else None
-                expires_at = window_end_at if window_end_at is not None else now + manual_ttl
-                state = CurrentRunState(
-                    schema_version=1,
-                    run_id=run_id,
-                    mode=mode,
-                    created_at=now,
-                    last_tick_at=now,
-                    expires_at=expires_at,
-                    window_end_at=window_end_at,
-                    tick_count=0,
-                    consecutive_idle_ticks=0,
-                )
-
-            state = state.on_tick(
-                now=now,
+        if run_lock is not None:
+            _require_held_run_lock(paths, run_lock=run_lock)
+            return _tick_run_locked(
+                paths=paths,
+                mode=mode,
                 actionable_work_found=actionable_work_found,
                 idle_ticks_to_end=idle_ticks_to_end,
                 manual_ttl=manual_ttl,
+                now=now,
             )
 
-            _ensure_run_artifacts(paths, state=state)
-            _write_json_atomic(paths.current_run_path, state.to_json_dict())
-            _append_run_log(
-                paths,
-                run_id=state.run_id,
-                message=(
-                    f"{now.isoformat()} tick={state.tick_count} mode={state.mode} "
-                    f"actionable_work_found={actionable_work_found} "
-                    f"consecutive_idle_ticks={state.consecutive_idle_ticks}"
-                ),
+        with RunLock(paths.run_lock_path):
+            return _tick_run_locked(
+                paths=paths,
+                mode=mode,
+                actionable_work_found=actionable_work_found,
+                idle_ticks_to_end=idle_ticks_to_end,
+                manual_ttl=manual_ttl,
+                now=now,
             )
+    except RunLockError as e:
+        raise RunLifecycleError(str(e)) from e
+    except RunStateError as e:
+        raise RunLifecycleError(str(e)) from e
 
+
+def ensure_active_run(
+    *,
+    paths: OrchestratorPaths,
+    mode: RunMode,
+    idle_ticks_to_end: int = 3,
+    manual_ttl: timedelta = timedelta(hours=12),
+    now: datetime | None = None,
+    run_lock: RunLock | None = None,
+) -> TickResult:
+    if now is None:
+        now = datetime.now().astimezone()
+    if now.tzinfo is None:
+        raise RunLifecycleError("ensure_active_run requires a timezone-aware now datetime.")
+
+    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _ensure_locked() -> TickResult:
+        state = _load_current_run_state(path=paths.current_run_path, now=now)
+
+        if state is not None and state.mode != mode:
+            try:
+                paths.current_run_path.unlink()
+            except FileNotFoundError:
+                pass
+            state = None
+
+        if state is not None:
             end_reason = state.should_end(now=now, idle_ticks_to_end=idle_ticks_to_end)
             if end_reason is not None:
                 _append_run_log(
@@ -196,7 +300,7 @@ def tick_run(
                 _end_run(paths, state=state, now=now, reason=end_reason)
                 return TickResult(
                     run_id=state.run_id,
-                    started_new=started_new,
+                    started_new=False,
                     ended=True,
                     end_reason=end_reason,
                     state=None,
@@ -204,13 +308,93 @@ def tick_run(
 
             return TickResult(
                 run_id=state.run_id,
-                started_new=started_new,
+                started_new=False,
                 ended=False,
                 end_reason=None,
                 state=state,
             )
+
+        if mode == "automated" and not DEFAULT_NIGHT_WINDOW.contains(now):
+            return TickResult(
+                run_id=None,
+                started_new=False,
+                ended=True,
+                end_reason="outside_window",
+                state=None,
+            )
+
+        run_id = _generate_run_id(now=now)
+        window_end_at = DEFAULT_NIGHT_WINDOW.end_for(now) if mode == "automated" else None
+        expires_at = window_end_at if window_end_at is not None else now + manual_ttl
+        state = CurrentRunState(
+            schema_version=1,
+            run_id=run_id,
+            mode=mode,
+            created_at=now,
+            last_tick_at=now,
+            expires_at=expires_at,
+            window_end_at=window_end_at,
+            tick_count=0,
+            consecutive_idle_ticks=0,
+        )
+        _ensure_run_artifacts(paths, state=state)
+        _write_json_atomic(paths.current_run_path, state.to_json_dict())
+        _append_run_log(paths, run_id=state.run_id, message=f"{now.isoformat()} start_run mode={mode}")
+        return TickResult(
+            run_id=state.run_id,
+            started_new=True,
+            ended=False,
+            end_reason=None,
+            state=state,
+        )
+
+    try:
+        if run_lock is not None:
+            _require_held_run_lock(paths, run_lock=run_lock)
+            return _ensure_locked()
+
+        with RunLock(paths.run_lock_path):
+            return _ensure_locked()
     except RunLockError as e:
         raise RunLifecycleError(str(e)) from e
     except RunStateError as e:
         raise RunLifecycleError(str(e)) from e
 
+
+def end_current_run(
+    *,
+    paths: OrchestratorPaths,
+    reason: str,
+    now: datetime | None = None,
+    run_lock: RunLock | None = None,
+) -> str | None:
+    if now is None:
+        now = datetime.now().astimezone()
+    if now.tzinfo is None:
+        raise RunLifecycleError("end_current_run requires a timezone-aware now datetime.")
+
+    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _end_locked() -> str | None:
+        state = _load_current_run_state(path=paths.current_run_path, now=now)
+        if state is None:
+            return None
+        _append_run_log(
+            paths,
+            run_id=state.run_id,
+            message=f"{now.isoformat()} end_run reason={reason}",
+        )
+        _end_run(paths, state=state, now=now, reason=reason)
+        return state.run_id
+
+    try:
+        if run_lock is not None:
+            _require_held_run_lock(paths, run_lock=run_lock)
+            return _end_locked()
+
+        with RunLock(paths.run_lock_path):
+            return _end_locked()
+    except RunLockError as e:
+        raise RunLifecycleError(str(e)) from e
+    except RunStateError as e:
+        raise RunLifecycleError(str(e)) from e
