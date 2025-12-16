@@ -50,6 +50,15 @@ class OrchestratorPaths:
     def run_summary_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "run_summary.json"
 
+    def run_end_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / "run_end.json"
+
+    def final_review_json_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / "final_review.json"
+
+    def final_review_md_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / "final_review.md"
+
     def repo_lock_path(self, repo_id: str) -> Path:
         return self.repo_locks_dir / f"{repo_id}.lock"
 

@@ -26,6 +26,11 @@ from codex_orchestrator.repo_execution import (
 )
 from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
 from codex_orchestrator.orchestrator_cycle import OrchestratorCycleError, run_orchestrator_cycle
+from codex_orchestrator.run_closure_review import (
+    RunClosureReviewError,
+    run_review_only_codex_pass,
+    write_final_review,
+)
 from codex_orchestrator.run_lifecycle import RunLifecycleError, tick_run
 
 
@@ -40,7 +45,7 @@ def _load_enforced_ai_settings() -> AiSettings:
 
 
 def _cmd_tick(args: argparse.Namespace) -> int:
-    _load_enforced_ai_settings()
+    ai_settings = _load_enforced_ai_settings()
     cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else default_cache_dir()
     paths = OrchestratorPaths(cache_dir=cache_dir)
     try:
@@ -55,6 +60,13 @@ def _cmd_tick(args: argparse.Namespace) -> int:
         raise SystemExit(f"codex-orchestrator: {e}") from e
 
     if result.ended:
+        if result.run_id is not None:
+            try:
+                write_final_review(paths, run_id=result.run_id, ai_settings=ai_settings)
+                if bool(args.final_review_codex):
+                    run_review_only_codex_pass(paths, run_id=result.run_id, ai_settings=ai_settings)
+            except RunClosureReviewError as e:
+                raise SystemExit(f"codex-orchestrator: {e}") from e
         if result.run_id is None:
             print(f"status=skipped reason={result.end_reason}")
         else:
@@ -173,6 +185,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             diff_cap_files=int(args.diff_cap_files),
             diff_cap_lines=int(args.diff_cap_lines),
             replan=bool(args.replan),
+            final_review_codex_review=bool(args.final_review_codex),
         )
     except (OrchestratorCycleError, RunLifecycleError) as e:
         raise SystemExit(f"codex-orchestrator: {e}") from e
@@ -473,6 +486,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Record that actionable work was found this tick (resets idle counter).",
     )
+    tick_parser.add_argument(
+        "--final-review-codex",
+        action="store_true",
+        help="After ending a run, optionally run a review-only Codex pass (must produce zero diffs).",
+    )
     tick_parser.set_defaults(func=_cmd_tick)
 
     run_parser = subparsers.add_parser("run", help="Execute one orchestrator cycle (all repos).")
@@ -542,6 +560,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--replan",
         action="store_true",
         help="Recompute each repo run deck even if one already exists for this RUN_ID+repo_id.",
+    )
+    run_parser.add_argument(
+        "--final-review-codex",
+        action="store_true",
+        help="After ending a run, optionally run a review-only Codex pass (must produce zero diffs).",
     )
     run_parser.set_defaults(func=_cmd_run)
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from codex_orchestrator.ai_policy import AiPolicyError, AiSettings, enforce_unattended_ai_policy, load_ai_settings
 from codex_orchestrator.orchestrator_cycle import OrchestratorCycleError, run_orchestrator_cycle
 from codex_orchestrator.paths import OrchestratorPaths, default_cache_dir
+from codex_orchestrator.run_closure_review import run_review_only_codex_pass, write_final_review
 from codex_orchestrator.run_lifecycle import RunLifecycleError, end_current_run
 from codex_orchestrator.run_lock import RunLock
 from codex_orchestrator.run_state import CurrentRunState
@@ -137,6 +138,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Recompute each repo run deck even if one already exists for this RUN_ID+repo_id.",
     )
+    p.add_argument(
+        "--final-review-codex",
+        action="store_true",
+        help="After ending a run, optionally run a review-only Codex pass (must produce zero diffs).",
+    )
     return p
 
 
@@ -202,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                 diff_cap_files=int(args.diff_cap_files),
                 diff_cap_lines=int(args.diff_cap_lines),
                 replan=bool(args.replan),
+                final_review_codex_review=bool(args.final_review_codex),
                 now=now,
             )
         except (OrchestratorCycleError, RunLifecycleError) as e:
@@ -221,12 +228,18 @@ def main(argv: list[str] | None = None) -> int:
     if run_id is not None:
         try:
             with RunLock(paths.run_lock_path) as lock:
-                end_current_run(
+                ended_run_id = end_current_run(
                     paths=paths,
                     reason="roadtrip_complete",
                     now=datetime.now().astimezone(),
                     run_lock=lock,
                 )
+                if ended_run_id is None:
+                    ended_run_id = run_id
+                if ended_run_id is not None:
+                    write_final_review(paths, run_id=ended_run_id, ai_settings=settings)
+                    if bool(args.final_review_codex):
+                        run_review_only_codex_pass(paths, run_id=ended_run_id, ai_settings=settings)
         except Exception as e:
             raise SystemExit(f"codex-roadtrip: failed to end run: {e}") from e
     return 0

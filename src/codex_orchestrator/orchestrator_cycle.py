@@ -18,6 +18,11 @@ from codex_orchestrator.repo_execution import (
 from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
 from codex_orchestrator.run_lifecycle import TickResult, ensure_active_run, tick_run
 from codex_orchestrator.run_lock import RunLock, RunLockError
+from codex_orchestrator.run_closure_review import (
+    RunClosureReviewError,
+    run_review_only_codex_pass,
+    write_final_review,
+)
 from codex_orchestrator.run_state import RunMode
 
 
@@ -50,6 +55,7 @@ def run_orchestrator_cycle(
     diff_cap_files: int = 25,
     diff_cap_lines: int = 1500,
     replan: bool = False,
+    final_review_codex_review: bool = False,
     now: datetime | None = None,
 ) -> OrchestratorCycleResult:
     if max_parallel < 1:
@@ -79,6 +85,17 @@ def run_orchestrator_cycle(
                 run_lock=lock,
             )
             if ensure_result.ended or ensure_result.run_id is None:
+                if ensure_result.ended and ensure_result.run_id is not None:
+                    try:
+                        write_final_review(paths, run_id=ensure_result.run_id, ai_settings=ai_settings)
+                        if final_review_codex_review:
+                            run_review_only_codex_pass(
+                                paths,
+                                run_id=ensure_result.run_id,
+                                ai_settings=ai_settings,
+                            )
+                    except RunClosureReviewError as e:
+                        raise OrchestratorCycleError(str(e)) from e
                 return OrchestratorCycleResult(
                     ensure_result=ensure_result,
                     tick_result=None,
@@ -124,6 +141,17 @@ def run_orchestrator_cycle(
                 now=datetime.now().astimezone(),
                 run_lock=lock,
             )
+            if tick_result.ended and tick_result.run_id is not None:
+                try:
+                    write_final_review(paths, run_id=tick_result.run_id, ai_settings=ai_settings)
+                    if final_review_codex_review:
+                        run_review_only_codex_pass(
+                            paths,
+                            run_id=tick_result.run_id,
+                            ai_settings=ai_settings,
+                        )
+                except RunClosureReviewError as e:
+                    raise OrchestratorCycleError(str(e)) from e
 
             return OrchestratorCycleResult(
                 ensure_result=ensure_result,
