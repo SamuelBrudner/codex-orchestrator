@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from codex_orchestrator.audit_trail import write_json_atomic, write_text_atomic
 from codex_orchestrator.beads_subprocess import bd_init, bd_list_ids, bd_ready
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import (
@@ -15,6 +16,7 @@ from codex_orchestrator.planner import (
     plan_deck_items,
     write_run_deck,
 )
+from codex_orchestrator.planning_audit import build_planning_audit, format_planning_audit_md
 from codex_orchestrator.repo_inventory import RepoPolicy
 from codex_orchestrator.validation_runner import run_validation_commands
 
@@ -92,6 +94,16 @@ def ensure_repo_run_deck(
         baseline_results_by_command=baseline_results_by_command,
         now=now,
     )
+
+    planning_audit_json_path = paths.repo_planning_audit_json_path(run_id, repo_policy.repo_id)
+    planning_audit_md_path = paths.repo_planning_audit_md_path(run_id, repo_policy.repo_id)
+    try:
+        audit = build_planning_audit(run_id=run_id, repo_policy=repo_policy)
+        write_json_atomic(planning_audit_json_path, audit)
+        write_text_atomic(planning_audit_md_path, format_planning_audit_md(audit))
+    except Exception as e:
+        raise PlanningPassError(f"Planning audit generation failed: {e}") from e
+
     deck_path = write_run_deck(paths, deck=deck)
 
     return RepoDeckPlan(

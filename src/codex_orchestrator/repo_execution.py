@@ -3,16 +3,17 @@ from __future__ import annotations
 import json
 import os
 import shlex
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from codex_orchestrator.ai_policy import (
-    AiSettings,
     REQUIRED_CODEX_MODEL,
     REQUIRED_REASONING_EFFORT,
+    AiSettings,
     codex_cli_args_for_settings,
 )
 from codex_orchestrator.audit_trail import (
@@ -100,6 +101,9 @@ class RepoExecutionConfig:
     )
 
 
+DEFAULT_REPO_EXECUTION_CONFIG = RepoExecutionConfig()
+
+
 @dataclass(frozen=True, slots=True)
 class TickBudget:
     started_at: datetime
@@ -176,7 +180,12 @@ def _is_behavioral_test_command(command: str) -> bool:
         return False
     if argv[0] == "pytest":
         return True
-    if argv[0] in {"python", "python3"} and len(argv) >= 3 and argv[1] == "-m" and argv[2] == "pytest":
+    if (
+        argv[0] in {"python", "python3"}
+        and len(argv) >= 3
+        and argv[1] == "-m"
+        and argv[2] == "pytest"
+    ):
         return True
     return False
 
@@ -407,7 +416,7 @@ def execute_repo_tick(
     repo_policy: RepoPolicy,
     overlay_path: Path,
     tick: TickBudget | None = None,
-    config: RepoExecutionConfig = RepoExecutionConfig(),
+    config: RepoExecutionConfig = DEFAULT_REPO_EXECUTION_CONFIG,
 ) -> RepoTickResult:
     if tick is None:
         started_at = _now()
@@ -439,12 +448,19 @@ def execute_repo_tick(
     deck_path: Path | None = None
     reused_existing_deck: bool | None = None
 
+    planning_audit_json_path = paths.repo_planning_audit_json_path(run_id, repo_policy.repo_id)
+    planning_audit_md_path = paths.repo_planning_audit_md_path(run_id, repo_policy.repo_id)
+
     def emit(event_type: str, **fields: Any) -> None:
         ts = _now().isoformat()
-        append_jsonl(
-            events_path,
-            {"ts": ts, "type": event_type, "run_id": run_id, "repo_id": repo_policy.repo_id, **fields},
-        )
+        payload = {
+            "ts": ts,
+            "type": event_type,
+            "run_id": run_id,
+            "repo_id": repo_policy.repo_id,
+            **fields,
+        }
+        append_jsonl(events_path, payload)
 
     def maybe_write_repo_report(*, branch: str | None) -> Path | None:
         nonlocal run_report_path
@@ -479,10 +495,17 @@ def execute_repo_tick(
                 *codex_cli_args_for_settings(config.ai_settings),
             )
         )
+        planning_audit = {
+            "json_path": planning_audit_json_path.relative_to(paths.cache_dir).as_posix(),
+            "md_path": planning_audit_md_path.relative_to(paths.cache_dir).as_posix(),
+            "json_exists": planning_audit_json_path.exists(),
+            "md_exists": planning_audit_md_path.exists(),
+        }
         content = format_repo_run_report_md(
             repo_id=repo_policy.repo_id,
             run_id=run_id,
             branch=branch,
+            planning_audit=planning_audit,
             ai_settings=config.ai_settings.to_json_dict(),
             codex_command=codex_command,
             beads=bead_audits,
@@ -496,7 +519,11 @@ def execute_repo_tick(
         )
 
         try:
-            run_report_path = write_repo_run_report(repo_root=repo_policy.path, run_id=run_id, content=content)
+            run_report_path = write_repo_run_report(
+                repo_root=repo_policy.path,
+                run_id=run_id,
+                content=content,
+            )
         except OSError as e:
             repo_failures.append(f"Run report write failed: {e}")
             emit("run_report_failed", error=str(e))
@@ -530,6 +557,12 @@ def execute_repo_tick(
             "beads_closed": result.beads_closed,
             "deck_path": deck_path.as_posix() if deck_path is not None else None,
             "reused_existing_deck": reused_existing_deck,
+            "planning_audit": {
+                "json_path": planning_audit_json_path.as_posix(),
+                "md_path": planning_audit_md_path.as_posix(),
+                "json_exists": planning_audit_json_path.exists(),
+                "md_exists": planning_audit_md_path.exists(),
+            },
             "run_report_path": run_report_path.as_posix() if run_report_path is not None else None,
             "beads": bead_audits,
             "planning_skipped_beads": planning_skipped,
@@ -637,12 +670,14 @@ def execute_repo_tick(
             emit("repo_start", branch=run_branch, base_branch=repo_policy.base_branch)
             _append_log(
                 run_log_path,
-                f"{_now().isoformat()} repo_start repo_id={repo_policy.repo_id} branch={run_branch}",
+                f"{_now().isoformat()} repo_start repo_id={repo_policy.repo_id} "
+                f"branch={run_branch}",
             )
             log_path = exec_log_path
             _append_log(
                 log_path,
-                f"{_now().isoformat()} repo_start repo_id={repo_policy.repo_id} branch={run_branch}",
+                f"{_now().isoformat()} repo_start repo_id={repo_policy.repo_id} "
+                f"branch={run_branch}",
             )
 
             try:
@@ -723,7 +758,7 @@ def execute_repo_tick(
                     break
 
                 try:
-                    from codex_orchestrator.beads_subprocess import bd_show, bd_update, bd_close
+                    from codex_orchestrator.beads_subprocess import bd_close, bd_show, bd_update
                 except Exception as e:  # pragma: no cover
                     raise RepoExecutionError(f"Failed to import bd wrappers: {e}") from e
 
@@ -785,20 +820,32 @@ def execute_repo_tick(
 
                 beads_attempted += 1
                 if issue.status == "open":
-                    bd_update(repo_root=repo_policy.path, issue_id=item.bead_id, status="in_progress")
+                    bd_update(
+                        repo_root=repo_policy.path,
+                        issue_id=item.bead_id,
+                        status="in_progress",
+                    )
 
                 head_before = git_rev_parse(repo_root=repo_policy.path)
-                codex_prompt = _format_codex_prompt(run_id=run_id, repo_policy=repo_policy, item=item)
+                codex_prompt = _format_codex_prompt(
+                    run_id=run_id,
+                    repo_policy=repo_policy,
+                    item=item,
+                )
                 timeout_seconds = max(
                     60.0,
                     min(
                         (tick.ends_at - now).total_seconds(),
-                        (timedelta(minutes=item.contract.time_budget_minutes) + config.codex_timeout_padding).total_seconds(),
+                        (
+                            timedelta(minutes=item.contract.time_budget_minutes)
+                            + config.codex_timeout_padding
+                        ).total_seconds(),
                     ),
                 )
                 _append_log(
                     log_path,
-                    f"{_now().isoformat()} codex_start bead_id={item.bead_id} timeout={timeout_seconds:.0f}s",
+                    f"{_now().isoformat()} codex_start bead_id={item.bead_id} "
+                    f"timeout={timeout_seconds:.0f}s",
                 )
                 codex_argv = (
                     "codex",
@@ -869,7 +916,8 @@ def execute_repo_tick(
 
                 _append_log(
                     log_path,
-                    f"{_now().isoformat()} codex_end bead_id={item.bead_id} exit={codex_invocation.exit_code}",
+                    f"{_now().isoformat()} codex_end bead_id={item.bead_id} "
+                    f"exit={codex_invocation.exit_code}",
                 )
                 emit(
                     "codex_end",
@@ -882,7 +930,8 @@ def execute_repo_tick(
                 _append_log(log_path, codex_invocation.stdout)
                 _append_log(
                     stdout_log_path,
-                    f"{_now().isoformat()} codex_stdout bead_id={item.bead_id} exit={codex_invocation.exit_code}",
+                    f"{_now().isoformat()} codex_stdout bead_id={item.bead_id} "
+                    f"exit={codex_invocation.exit_code}",
                 )
                 _append_log(stdout_log_path, codex_invocation.stdout)
                 if codex_invocation.stderr.strip():
@@ -890,7 +939,8 @@ def execute_repo_tick(
                     _append_log(log_path, codex_invocation.stderr)
                     _append_log(
                         stderr_log_path,
-                        f"{_now().isoformat()} codex_stderr bead_id={item.bead_id} exit={codex_invocation.exit_code}",
+                        f"{_now().isoformat()} codex_stderr bead_id={item.bead_id} "
+                        f"exit={codex_invocation.exit_code}",
                     )
                     _append_log(stderr_log_path, codex_invocation.stderr)
 
@@ -912,8 +962,11 @@ def execute_repo_tick(
                     bd_update(
                         repo_root=repo_policy.path,
                         issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "")
-                        + "[orchestrator] No git changes detected after codex; cannot commit/close.",
+                        notes=(
+                            (issue.notes + "\n" if issue.notes else "")
+                            + "[orchestrator] No git changes detected after codex; "
+                            "cannot commit/close."
+                        ),
                     )
                     bead_results.append(
                         BeadResult(
@@ -1088,13 +1141,15 @@ def execute_repo_tick(
                     validation_status_by_command[cmd] = _validation_status(r.exit_code)
                     _append_log(
                         stdout_log_path,
-                        f"{_now().isoformat()} validation_stdout bead_id={item.bead_id} cmd={cmd} exit={r.exit_code}",
+                        f"{_now().isoformat()} validation_stdout bead_id={item.bead_id} "
+                        f"cmd={cmd} exit={r.exit_code}",
                     )
                     if r.stdout.strip():
                         _append_log(stdout_log_path, r.stdout)
                     _append_log(
                         stderr_log_path,
-                        f"{_now().isoformat()} validation_stderr bead_id={item.bead_id} cmd={cmd} exit={r.exit_code}",
+                        f"{_now().isoformat()} validation_stderr bead_id={item.bead_id} "
+                        f"cmd={cmd} exit={r.exit_code}",
                     )
                     if r.stderr.strip():
                         _append_log(stderr_log_path, r.stderr)
@@ -1105,20 +1160,27 @@ def execute_repo_tick(
                 )
                 baseline = _baseline_by_command(item)
                 baseline_failures = sorted(
-                    cmd for cmd, r in baseline.items() if cmd in validation_results and r.exit_code != 0
+                    cmd
+                    for cmd, r in baseline.items()
+                    if cmd in validation_results
+                    and r.exit_code != 0
                 )
                 still_failing = sorted(
                     cmd
                     for cmd in baseline_failures
-                    if validation_results.get(cmd) is not None and validation_results[cmd].exit_code != 0
+                    if validation_results.get(cmd) is not None
+                    and validation_results[cmd].exit_code != 0
                 )
                 if still_failing:
                     bd_update(
                         repo_root=repo_policy.path,
                         issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "")
-                        + "[orchestrator] Pre-existing failing validations remain failing; cannot close.\n"
-                        + _format_validation_summary(validation_results),
+                        notes=(
+                            (issue.notes + "\n" if issue.notes else "")
+                            + "[orchestrator] Pre-existing failing validations remain failing; "
+                            "cannot close.\n"
+                            + _format_validation_summary(validation_results)
+                        ),
                     )
                     bead_results.append(
                         BeadResult(
@@ -1141,12 +1203,16 @@ def execute_repo_tick(
                             },
                         }
                     )
-                    repo_failures.append(f"{item.bead_id}: baseline failing validations still failing.")
+                    repo_failures.append(
+                        f"{item.bead_id}: baseline failing validations still failing."
+                    )
                     stop_reason = "blocked"
                     maybe_write_repo_report(branch=run_branch)
                     break
 
-                failed_commands = sorted(cmd for cmd, r in validation_results.items() if r.exit_code != 0)
+                failed_commands = sorted(
+                    cmd for cmd, r in validation_results.items() if r.exit_code != 0
+                )
                 if failed_commands:
                     bd_update(
                         repo_root=repo_policy.path,
@@ -1183,7 +1249,10 @@ def execute_repo_tick(
                     maybe_write_repo_report(branch=run_branch)
                     break
 
-                if not any(_is_behavioral_test_command(c) for c in item.contract.validation_commands):
+                if not any(
+                    _is_behavioral_test_command(c)
+                    for c in item.contract.validation_commands
+                ):
                     bd_update(
                         repo_root=repo_policy.path,
                         issue_id=item.bead_id,
@@ -1211,7 +1280,9 @@ def execute_repo_tick(
                             },
                         }
                     )
-                    repo_failures.append(f"{item.bead_id}: no behavioral test executed; cannot close.")
+                    repo_failures.append(
+                        f"{item.bead_id}: no behavioral test executed; cannot close."
+                    )
                     stop_reason = "blocked"
                     maybe_write_repo_report(branch=run_branch)
                     break
@@ -1236,7 +1307,8 @@ def execute_repo_tick(
                     "detail": "Closed successfully.",
                     "changed_paths": list(changed_paths),
                     "validation": {
-                        cmd: _validation_status(r.exit_code) for cmd, r in validation_results.items()
+                        cmd: _validation_status(r.exit_code)
+                        for cmd, r in validation_results.items()
                     },
                     "dependents_updated": dependents_updated,
                 }
@@ -1372,7 +1444,7 @@ def execute_repos_tick(
     overlays_dir: Path,
     max_parallel: int,
     tick: TickBudget | None = None,
-    config: RepoExecutionConfig = RepoExecutionConfig(),
+    config: RepoExecutionConfig = DEFAULT_REPO_EXECUTION_CONFIG,
 ) -> tuple[RepoTickResult, ...]:
     if max_parallel < 1:
         raise RepoExecutionError(f"max_parallel must be >= 1, got {max_parallel}")

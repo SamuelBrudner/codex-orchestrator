@@ -87,3 +87,9 @@ class OrchestratorPaths:
         pattern = f"{repo_id}.deck.*.json"
         candidates = sorted(self.run_dir(run_id).glob(pattern))
         return candidates[0] if candidates else None
+
+    def repo_planning_audit_json_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.planning_audit.json"
+
+    def repo_planning_audit_md_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.planning_audit.md"

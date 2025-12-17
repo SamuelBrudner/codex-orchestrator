@@ -5,9 +5,10 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 
 class AuditTrailError(RuntimeError):
@@ -26,6 +27,23 @@ def write_json_atomic(path: Path, data: Any) -> None:
     ) as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
+        tmp_name = f.name
+    os.replace(tmp_name, path)
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        delete=False,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    ) as f:
+        f.write(content)
+        if not content.endswith("\n"):
+            f.write("\n")
         tmp_name = f.name
     os.replace(tmp_name, path)
 
@@ -89,6 +107,7 @@ def format_repo_run_report_md(
     repo_id: str,
     run_id: str,
     branch: str | None,
+    planning_audit: Mapping[str, Any] | None = None,
     ai_settings: Mapping[str, str] | None,
     codex_command: str | None,
     beads: list[Mapping[str, Any]],
@@ -110,7 +129,10 @@ def format_repo_run_report_md(
         closed = sum(1 for b in beads if b.get("outcome") == "closed")
         failed = sum(1 for b in beads if b.get("outcome") == "failed")
         skipped = sum(1 for b in beads if str(b.get("outcome", "")).startswith("skipped"))
-        lines.append(f"- Beads: closed={closed} failed={failed} skipped={skipped} total={len(beads)}")
+        summary = (
+            f"- Beads: closed={closed} failed={failed} skipped={skipped} total={len(beads)}"
+        )
+        lines.append(summary)
     else:
         lines.append("- No beads attempted.")
     if failures:
@@ -121,6 +143,32 @@ def format_repo_run_report_md(
     lines.append("## Run")
     lines.append(f"- RUN_ID: `{run_id}`")
     lines.append(f"- Branch: `{branch_display}`")
+    lines.append("")
+
+    lines.append("## Planning Audit")
+    if planning_audit is None:
+        lines.append("- <unavailable>")
+    else:
+        json_path = planning_audit.get("json_path")
+        md_path = planning_audit.get("md_path")
+        json_exists = planning_audit.get("json_exists")
+        md_exists = planning_audit.get("md_exists")
+
+        json_suffix = ""
+        if isinstance(json_exists, bool):
+            json_suffix = " (exists)" if json_exists else " (missing)"
+        md_suffix = ""
+        if isinstance(md_exists, bool):
+            md_suffix = " (exists)" if md_exists else " (missing)"
+
+        if isinstance(json_path, str) and json_path.strip():
+            lines.append(f"- JSON: `{json_path}`{json_suffix}")
+        else:
+            lines.append("- JSON: <missing>")
+        if isinstance(md_path, str) and md_path.strip():
+            lines.append(f"- Markdown: `{md_path}`{md_suffix}")
+        else:
+            lines.append("- Markdown: <missing>")
     lines.append("")
 
     lines.append("## AI Configuration")

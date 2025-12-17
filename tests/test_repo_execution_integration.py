@@ -12,7 +12,12 @@ import pytest
 from codex_orchestrator.contracts import ResolvedExecutionContract
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import RunDeck, RunDeckItem, ValidationResult, write_run_deck
-from codex_orchestrator.repo_execution import DiffCaps, RepoExecutionConfig, TickBudget, execute_repo_tick
+from codex_orchestrator.repo_execution import (
+    DiffCaps,
+    RepoExecutionConfig,
+    TickBudget,
+    execute_repo_tick,
+)
 from codex_orchestrator.repo_inventory import RepoPolicy
 
 
@@ -38,7 +43,10 @@ def _write_fake_bd(bin_dir: Path) -> None:
                 "    return json.loads(DB.read_text(encoding='utf-8'))",
                 "",
                 "def save(data):",
-                "    DB.write_text(json.dumps(data, indent=2, sort_keys=True) + '\\n', encoding='utf-8')",
+                "    DB.write_text(",
+                "        json.dumps(data, indent=2, sort_keys=True) + '\\n',",
+                "        encoding='utf-8',",
+                "    )",
                 "",
                 "def main(argv):",
                 "    if len(argv) < 2:",
@@ -113,7 +121,10 @@ def _write_fake_codex(bin_dir: Path) -> None:
                 "from pathlib import Path",
                 "",
                 "def main(argv):",
-                "    Path('.fake_codex_argv.json').write_text(json.dumps(argv) + '\\n', encoding='utf-8')",
+                "    Path('.fake_codex_argv.json').write_text(",
+                "        json.dumps(argv) + '\\n',",
+                "        encoding='utf-8',",
+                "    )",
                 "    # Minimal stub: read prompt from stdin and create a file to commit.",
                 "    _ = sys.stdin.read()",
                 "    Path('work.txt').write_text('hello\\n', encoding='utf-8')",
@@ -140,14 +151,19 @@ def _git(repo_root: Path, *args: str) -> str:
     return (completed.stdout or "").strip()
 
 
-def test_execute_repo_tick_closes_bead_and_updates_dependents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execute_repo_tick_closes_bead_and_updates_dependents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     _git(repo_root, "init", "-b", "main")
     _git(repo_root, "config", "user.name", "Test")
     _git(repo_root, "config", "user.email", "test@example.com")
     (repo_root / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
-    (repo_root / "test_dummy.py").write_text("def test_ok():\n    assert 1 + 1 == 2\n", encoding="utf-8")
+    (repo_root / "test_dummy.py").write_text(
+        "def test_ok():\n    assert 1 + 1 == 2\n",
+        encoding="utf-8",
+    )
     _git(repo_root, "add", "-A")
     _git(repo_root, "commit", "-m", "init")
 
@@ -273,10 +289,26 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(tmp_path: Path, mo
     assert codex_argv[codex_argv.index("-c") + 1] == 'reasoning_effort="xhigh"'
 
     report_text = (repo_root / "docs" / "runs" / f"{run_id}.md").read_text(encoding="utf-8")
+    assert "## Planning Audit" in report_text
+    audit_json_rel = f"runs/{run_id}/test_repo.planning_audit.json"
+    audit_md_rel = f"runs/{run_id}/test_repo.planning_audit.md"
+    assert f"`{audit_json_rel}`" in report_text
+    assert f"`{audit_md_rel}`" in report_text
+    assert "(missing)" in report_text
     assert "## AI Configuration" in report_text
     assert "- Model: `gpt-5.2`" in report_text
     assert "- Reasoning effort: `xhigh`" in report_text
     assert "reasoning_effort=\"xhigh\"" in report_text
+
+    summary = json.loads(paths.repo_summary_path(run_id, "test_repo").read_text(encoding="utf-8"))
+    planning_audit = summary.get("planning_audit")
+    assert isinstance(planning_audit, dict)
+    expected_json_path = paths.repo_planning_audit_json_path(run_id, "test_repo").as_posix()
+    expected_md_path = paths.repo_planning_audit_md_path(run_id, "test_repo").as_posix()
+    assert planning_audit.get("json_path") == expected_json_path
+    assert planning_audit.get("md_path") == expected_md_path
+    assert planning_audit.get("json_exists") is False
+    assert planning_audit.get("md_exists") is False
 
     issues = json.loads((repo_root / ".fake_beads.json").read_text(encoding="utf-8"))
     assert issues["bd-1"]["status"] == "closed"
