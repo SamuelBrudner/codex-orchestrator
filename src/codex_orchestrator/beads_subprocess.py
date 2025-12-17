@@ -159,6 +159,42 @@ def bd_list_ids(*, repo_root: Path) -> set[str]:
     return out
 
 
+def bd_list_open_titles(*, repo_root: Path) -> set[str]:
+    data = _parse_json_output(_run_bd(["list", "--json"], cwd=repo_root))
+    if data is None:
+        return set()
+    if not isinstance(data, list):
+        raise BdCliError(f"bd list --json: expected a list, got {type(data).__name__}")
+
+    open_titles: set[str] = set()
+    for idx, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise BdCliError(
+                f"bd list --json: expected objects, got {type(item).__name__} at index {idx}"
+            )
+        issue_id = item.get("id")
+        if not isinstance(issue_id, str) or not issue_id.strip():
+            raise BdCliError(f"bd list --json: missing string id at index {idx}")
+
+        title = item.get("title")
+        status = item.get("status")
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(status, str)
+            or not status.strip()
+        ):
+            issue = bd_show(repo_root=repo_root, issue_id=issue_id)
+            title = issue.title
+            status = issue.status
+
+        if str(status).strip().lower() == "closed":
+            continue
+        open_titles.add(str(title))
+
+    return open_titles
+
+
 def bd_show(*, repo_root: Path, issue_id: str) -> BdIssue:
     data = _parse_json_output(_run_bd(["show", issue_id, "--json"], cwd=repo_root))
     return _parse_issue(data, context=f"bd show {issue_id} --json")
@@ -186,3 +222,15 @@ def bd_close(*, repo_root: Path, issue_id: str, reason: str) -> BdIssue:
         _run_bd(["close", issue_id, "--reason", reason, "--json"], cwd=repo_root)
     )
     return _parse_issue(data, context=f"bd close {issue_id} --json")
+
+
+def bd_create(
+    *,
+    repo_root: Path,
+    title: str,
+    issue_type: str = "task",
+    priority: int = 2,
+) -> BdIssue:
+    args: list[str] = ["create", title, "-t", issue_type, "-p", str(priority), "--json"]
+    data = _parse_json_output(_run_bd(args, cwd=repo_root))
+    return _parse_issue(data, context="bd create --json")

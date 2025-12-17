@@ -116,6 +116,8 @@ class ContractOverlayPatch:
     env: str | None = None
     allow_env_creation: bool | None = None
     requires_notebook_execution: bool | None = None
+    enable_planning_audit_issue_creation: bool | None = None
+    planning_audit_issue_limit: int | None = None
     allowed_roots: tuple[Path, ...] | None = None
     deny_roots: tuple[Path, ...] | None = None
 
@@ -134,6 +136,8 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
         "env",
         "allow_env_creation",
         "requires_notebook_execution",
+        "enable_planning_audit_issue_creation",
+        "planning_audit_issue_limit",
         "allowed_roots",
         "deny_roots",
     }
@@ -170,6 +174,21 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
         field=f"{prefix}.requires_notebook_execution",
         errors=errors,
     )
+    enable_planning_audit_issue_creation = _as_bool(
+        table.get("enable_planning_audit_issue_creation"),
+        field=f"{prefix}.enable_planning_audit_issue_creation",
+        errors=errors,
+    )
+    planning_audit_issue_limit = _as_int(
+        table.get("planning_audit_issue_limit"),
+        field=f"{prefix}.planning_audit_issue_limit",
+        errors=errors,
+    )
+    if planning_audit_issue_limit is not None and planning_audit_issue_limit < 0:
+        errors.append(
+            f"{prefix}.planning_audit_issue_limit: must be >= 0, got {planning_audit_issue_limit}"
+        )
+        planning_audit_issue_limit = None
     allowed_roots = _as_rel_paths(
         table.get("allowed_roots"),
         field=f"{prefix}.allowed_roots",
@@ -187,6 +206,8 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
         env=env,
         allow_env_creation=allow_env_creation,
         requires_notebook_execution=requires_notebook_execution,
+        enable_planning_audit_issue_creation=enable_planning_audit_issue_creation,
+        planning_audit_issue_limit=planning_audit_issue_limit,
         allowed_roots=allowed_roots,
         deny_roots=deny_roots,
     )

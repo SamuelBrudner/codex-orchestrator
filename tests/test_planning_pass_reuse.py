@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from codex_orchestrator.beads_subprocess import BdIssue
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import (
     ReadyBead,
@@ -261,3 +262,157 @@ def test_planning_pass_fails_without_writing_deck_when_audit_fails(
     assert paths.find_existing_run_deck_path(run_id, "test_repo") is None
     assert paths.repo_planning_audit_json_path(run_id, "test_repo").exists() is False
     assert paths.repo_planning_audit_md_path(run_id, "test_repo").exists() is False
+
+
+def test_planning_pass_creates_planning_audit_issues_once_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlay_path = tmp_path / "test_repo.toml"
+    _write_overlay(
+        overlay_path,
+        "\n".join(
+            [
+                "[defaults]",
+                "time_budget_minutes = 45",
+                "allow_env_creation = false",
+                "requires_notebook_execution = false",
+                'validation_commands = ["pytest -q"]',
+                'env = "default_env"',
+                "enable_planning_audit_issue_creation = true",
+                "planning_audit_issue_limit = 2",
+                "",
+            ]
+        ),
+    )
+
+    policy = _policy(tmp_path=tmp_path)
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "run-issue-1"
+    now = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    import codex_orchestrator.planning_audit_issues as audit_issues
+    import codex_orchestrator.planning_pass as planning_pass
+
+    def _bd_init(*, repo_root: Path) -> None:
+        return None
+
+    def _bd_list_ids(*, repo_root: Path) -> set[str]:
+        return {"bd-1"}
+
+    def _bd_ready(*, repo_root: Path) -> list[ReadyBead]:
+        return [ReadyBead(bead_id="bd-1", title="My bead")]
+
+    def _run_validations(
+        commands,
+        *,
+        cwd: Path,
+        timeout_seconds: float = 900.0,
+        output_limit_chars: int = 20_000,
+    ) -> dict[str, ValidationResult]:
+        return {
+            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
+            for cmd in commands
+        }
+
+    def _build_audit(*, run_id: str, repo_policy: RepoPolicy) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "repo_id": repo_policy.repo_id,
+            "findings": [
+                {
+                    "category": "semantic_registry",
+                    "title": "Already exists",
+                    "severity": "high",
+                    "confidence": "high",
+                    "recommendation": "Do the thing",
+                },
+                {
+                    "category": "semantic_registry",
+                    "title": "Create me next",
+                    "severity": "medium",
+                    "confidence": "high",
+                    "recommendation": "Do the next thing",
+                },
+                {
+                    "category": "semantic_modeling_consistency",
+                    "title": "Create me too",
+                    "severity": "low",
+                    "confidence": "medium",
+                    "recommendation": "Do the other thing",
+                },
+            ],
+            "summary": {"overall_severity": "high", "findings_count": 3},
+        }
+
+    created: list[tuple[str, str]] = []
+    create_counter = {"n": 0}
+
+    def _bd_list_open_titles(*, repo_root: Path) -> set[str]:
+        return {"planning-audit(semantic_registry): Already exists"}
+
+    def _bd_create(
+        *, repo_root: Path, title: str, issue_type: str = "task", priority: int = 2
+    ) -> BdIssue:
+        create_counter["n"] += 1
+        issue_id = f"bd-created-{create_counter['n']}"
+        created.append((issue_id, title))
+        return BdIssue(
+            issue_id=issue_id,
+            title=title,
+            status="open",
+            notes="",
+            dependencies=(),
+            dependents=(),
+        )
+
+    def _bd_update(*, repo_root: Path, issue_id: str, status=None, notes=None) -> BdIssue:
+        matching = next((t for i, t in created if i == issue_id), "<unknown>")
+        return BdIssue(
+            issue_id=issue_id,
+            title=matching,
+            status="open",
+            notes=str(notes or ""),
+            dependencies=(),
+            dependents=(),
+        )
+
+    monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
+    monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
+    monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
+    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
+    monkeypatch.setattr(planning_pass, "build_planning_audit", _build_audit)
+
+    monkeypatch.setattr(audit_issues, "bd_list_open_titles", _bd_list_open_titles)
+    monkeypatch.setattr(audit_issues, "bd_create", _bd_create)
+    monkeypatch.setattr(audit_issues, "bd_update", _bd_update)
+
+    ensure_repo_run_deck(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=overlay_path,
+        replan=False,
+        now=now,
+    )
+
+    audit_json_path = paths.repo_planning_audit_json_path(run_id, "test_repo")
+    audit = json.loads(audit_json_path.read_text(encoding="utf-8"))
+    assert audit["created_issues"] == [
+        {"id": "bd-created-1", "title": "planning-audit(semantic_registry): Create me next"},
+        {
+            "id": "bd-created-2",
+            "title": "planning-audit(semantic_modeling_consistency): Create me too",
+        },
+    ]
+    assert create_counter["n"] == 2
+
+    ensure_repo_run_deck(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=overlay_path,
+        replan=True,
+        now=now,
+    )
+    assert create_counter["n"] == 2
