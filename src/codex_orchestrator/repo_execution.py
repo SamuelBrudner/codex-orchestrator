@@ -232,6 +232,13 @@ def _format_codex_prompt(
             f"- Complete bead {item.bead_id} ({item.title}) conservatively.",
             "- Make the minimal safe changes needed.",
             "- Ensure validation commands pass.",
+            "",
+            "Style:",
+            "- Prefer idiomatic, readable code; avoid deep nesting.",
+            "- In pandas: prefer method chaining and `DataFrame.query(...)`",
+            "  over temporary boolean masks, and avoid intermediate filtered DataFrames.",
+            "- For seaborn/matplotlib: prefer passing filtered data inline",
+            "  (e.g. `sns.someplot(data=df.query(\"...\"), ...)`).",
         ]
     )
 

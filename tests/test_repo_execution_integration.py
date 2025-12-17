@@ -125,8 +125,9 @@ def _write_fake_codex(bin_dir: Path) -> None:
                 "        json.dumps(argv) + '\\n',",
                 "        encoding='utf-8',",
                 "    )",
-                "    # Minimal stub: read prompt from stdin and create a file to commit.",
-                "    _ = sys.stdin.read()",
+                "    # Minimal stub: capture prompt from stdin and create a file to commit.",
+                "    prompt = sys.stdin.read()",
+                "    Path('.fake_codex_prompt.txt').write_text(prompt, encoding='utf-8')",
                 "    Path('work.txt').write_text('hello\\n', encoding='utf-8')",
                 "    print('ok')",
                 "    return 0",
@@ -350,6 +351,12 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     assert codex_argv[codex_argv.index("--model") + 1] == "gpt-5.2"
     assert "-c" in codex_argv
     assert codex_argv[codex_argv.index("-c") + 1] == 'reasoning_effort="xhigh"'
+
+    codex_prompt = (repo_root / ".fake_codex_prompt.txt").read_text(encoding="utf-8")
+    assert "Style:" in codex_prompt
+    assert "avoid deep nesting" in codex_prompt
+    assert "DataFrame.query" in codex_prompt
+    assert "sns.someplot(data=df.query" in codex_prompt
 
     report_text = (repo_root / "docs" / "runs" / f"{run_id}.md").read_text(encoding="utf-8")
     assert "## Planning Audit" in report_text
