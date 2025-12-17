@@ -83,6 +83,35 @@ def _setup_fake_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     _write_tool(
         bin_dir,
+        "conda",
+        [
+            "#!/usr/bin/env python3",
+            "from __future__ import annotations",
+            "import subprocess",
+            "import sys",
+            "def main(argv):",
+            "  if '--version' in argv[1:]:",
+            "    print('conda 0.0.0')",
+            "    return 0",
+            "  if len(argv) >= 2 and argv[1] == 'run':",
+            "    args = argv[2:]",
+            "    i = 0",
+            "    while i < len(args):",
+            "      if args[i] == '-n': i += 2; continue",
+            "      if args[i] == '--no-capture-output': i += 1; continue",
+            "      if args[i] == '--': i += 1; break",
+            "      if args[i].startswith('-'): i += 1; continue",
+            "      break",
+            "    cmd = args[i:]",
+            "    if not cmd: return 2",
+            "    completed = subprocess.run(cmd, check=False)",
+            "    return int(completed.returncode)",
+            "  return 1",
+            "if __name__ == '__main__': raise SystemExit(main(sys.argv))",
+        ],
+    )
+    _write_tool(
+        bin_dir,
         "codex",
         [
             "#!/usr/bin/env python3",
@@ -240,4 +269,3 @@ def test_bead_cap_limits_attempts(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert result.skipped is False
     assert result.beads_attempted == 1
     assert result.stop_reason == "bead_cap"
-

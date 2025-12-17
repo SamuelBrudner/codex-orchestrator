@@ -1135,6 +1135,7 @@ def execute_repo_tick(
                 validation_results = run_validation_commands(
                     item.contract.validation_commands,
                     cwd=repo_policy.path,
+                    env=item.contract.env,
                     timeout_seconds=config.validation_timeout_seconds,
                 )
                 for cmd, r in validation_results.items():

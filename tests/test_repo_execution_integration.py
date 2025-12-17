@@ -140,6 +140,66 @@ def _write_fake_codex(bin_dir: Path) -> None:
     _make_executable(script)
 
 
+def _write_fake_conda(bin_dir: Path) -> None:
+    script = bin_dir / "conda"
+    script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "from __future__ import annotations",
+                "import json",
+                "import os",
+                "import subprocess",
+                "import sys",
+                "from pathlib import Path",
+                "",
+                "def _log(argv):",
+                "    path = os.environ.get('FAKE_CONDA_LOG')",
+                "    if not path:",
+                "        return",
+                "    p = Path(path)",
+                "    p.parent.mkdir(parents=True, exist_ok=True)",
+                "    with p.open('a', encoding='utf-8') as f:",
+                "        f.write(json.dumps(argv) + '\\n')",
+                "",
+                "def main(argv):",
+                "    _log(argv)",
+                "    if '--version' in argv[1:]:",
+                "        print('conda 0.0.0')",
+                "        return 0",
+                "    if len(argv) >= 2 and argv[1] == 'run':",
+                "        args = argv[2:]",
+                "        i = 0",
+                "        while i < len(args):",
+                "            if args[i] == '-n':",
+                "                i += 2",
+                "                continue",
+                "            if args[i] == '--no-capture-output':",
+                "                i += 1",
+                "                continue",
+                "            if args[i] == '--':",
+                "                i += 1",
+                "                break",
+                "            if args[i].startswith('-'):",
+                "                i += 1",
+                "                continue",
+                "            break",
+                "        cmd = args[i:]",
+                "        if not cmd:",
+                "            return 2",
+                "        completed = subprocess.run(cmd, check=False)",
+                "        return int(completed.returncode)",
+                "    return 1",
+                "",
+                "if __name__ == '__main__':",
+                "    raise SystemExit(main(sys.argv))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _make_executable(script)
+
+
 def _git(repo_root: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args],
@@ -252,7 +312,10 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     bin_dir.mkdir()
     _write_fake_bd(bin_dir)
     _write_fake_codex(bin_dir)
+    _write_fake_conda(bin_dir)
 
+    conda_log = tmp_path / "conda_argv.jsonl"
+    monkeypatch.setenv("FAKE_CONDA_LOG", conda_log.as_posix())
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
 
     started_at = datetime.now().astimezone()
@@ -319,3 +382,14 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     message = _git(repo_root, "log", "-1", "--pretty=%B")
     assert message.splitlines()[0] == "beads(bd-1): Test bead"
     assert f"RUN_ID: {run_id}" in message
+
+    invocations = [
+        json.loads(line)
+        for line in conda_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    run_calls = [argv for argv in invocations if len(argv) >= 2 and argv[1] == "run"]
+    assert run_calls, "expected at least one `conda run` invocation"
+    assert "-n" in run_calls[0]
+    assert run_calls[0][run_calls[0].index("-n") + 1] == "test"
+    assert "pytest" in run_calls[0]

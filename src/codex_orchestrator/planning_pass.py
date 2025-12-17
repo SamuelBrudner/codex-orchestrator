@@ -76,6 +76,14 @@ def _collect_validation_commands(planning: PlanningResult) -> list[str]:
     return commands
 
 
+def _baseline_env(repo_policy: RepoPolicy, planning: PlanningResult) -> str | None:
+    if repo_policy.env is not None and repo_policy.env.strip():
+        return repo_policy.env
+    if planning.deck_items:
+        return planning.deck_items[0].contract.env
+    return None
+
+
 def ensure_repo_run_deck(
     *,
     paths: OrchestratorPaths,
@@ -118,6 +126,7 @@ def ensure_repo_run_deck(
     baseline_results_by_command = run_validation_commands(
         validation_commands,
         cwd=repo_policy.path,
+        env=_baseline_env(repo_policy, planning),
     )
 
     deck = build_run_deck(

@@ -154,6 +154,7 @@ def test_planning_pass_writes_planning_audit_artifacts(
         commands,
         *,
         cwd: Path,
+        env: str | None = None,
         timeout_seconds: float = 900.0,
         output_limit_chars: int = 20_000,
     ) -> dict[str, ValidationResult]:
@@ -232,6 +233,7 @@ def test_planning_pass_fails_without_writing_deck_when_audit_fails(
         commands,
         *,
         cwd: Path,
+        env: str | None = None,
         timeout_seconds: float = 900.0,
         output_limit_chars: int = 20_000,
     ) -> dict[str, ValidationResult]:
@@ -306,6 +308,7 @@ def test_planning_pass_creates_planning_audit_issues_once_when_enabled(
         commands,
         *,
         cwd: Path,
+        env: str | None = None,
         timeout_seconds: float = 900.0,
         output_limit_chars: int = 20_000,
     ) -> dict[str, ValidationResult]:
@@ -416,3 +419,4 @@ def test_planning_pass_creates_planning_audit_issues_once_when_enabled(
         now=now,
     )
     assert create_counter["n"] == 2
+
