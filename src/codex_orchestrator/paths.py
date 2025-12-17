@@ -59,6 +59,12 @@ class OrchestratorPaths:
     def final_review_md_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "final_review.md"
 
+    def run_signoff_json_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / "run_signoff.json"
+
+    def run_signoff_md_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / "run_signoff.md"
+
     def repo_lock_path(self, repo_id: str) -> Path:
         return self.repo_locks_dir / f"{repo_id}.lock"
 
