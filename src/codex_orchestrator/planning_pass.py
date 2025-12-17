@@ -9,6 +9,12 @@ from pathlib import Path
 from codex_orchestrator.audit_trail import write_json_atomic, write_text_atomic
 from codex_orchestrator.beads_subprocess import bd_init, bd_list_ids, bd_ready
 from codex_orchestrator.contract_overlays import load_contract_overlay
+from codex_orchestrator.git_subprocess import GitError
+from codex_orchestrator.notebook_refactor_issues import (
+    NotebookRefactorResult,
+    detect_changed_notebooks,
+    ensure_notebook_refactor_issues,
+)
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import (
     PlanningResult,
@@ -115,6 +121,47 @@ def ensure_repo_run_deck(
     known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
     ready_beads = bd_ready(repo_root=repo_policy.path)
 
+    overlay = load_contract_overlay(
+        overlay_path,
+        repo_policy=repo_policy,
+        known_bead_ids=known_bead_ids,
+    )
+
+    notebook_changes: tuple[str, ...] = ()
+    notebook_refactor: NotebookRefactorResult | None = None
+    try:
+        notebook_changes = detect_changed_notebooks(
+            repo_root=repo_policy.path,
+            notebook_roots=repo_policy.notebook_roots,
+        )
+    except GitError as e:
+        logger.warning(
+            "Notebook change detection skipped for repo_id=%s: %s",
+            repo_policy.repo_id,
+            e,
+        )
+
+    enable_notebook_refactors = bool(
+        overlay.defaults.enable_notebook_refactor_issue_creation or False
+    )
+    notebook_refactor_limit = int(overlay.defaults.notebook_refactor_issue_limit or 0)
+    if enable_notebook_refactors and notebook_refactor_limit > 0 and notebook_changes:
+        notebook_refactor = ensure_notebook_refactor_issues(
+            repo_root=repo_policy.path,
+            notebook_paths=notebook_changes,
+            limit=notebook_refactor_limit,
+            time_budget_minutes=overlay.defaults.time_budget_minutes,
+            validation_commands=(
+                tuple(repo_policy.validation_commands)
+                + tuple(overlay.defaults.validation_commands or ())
+            ),
+            notebook_output_policy=repo_policy.notebook_output_policy,
+            block_bead_ids=tuple(bead.bead_id for bead in ready_beads),
+        )
+        if notebook_refactor.issue_ids:
+            known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
+            ready_beads = bd_ready(repo_root=repo_policy.path)
+
     planning = plan_deck_items(
         repo_policy=repo_policy,
         overlay_path=overlay_path,
@@ -142,13 +189,17 @@ def ensure_repo_run_deck(
     is_first_planning_pass = not planning_audit_json_path.exists()
     try:
         audit = build_planning_audit(run_id=run_id, repo_policy=repo_policy)
+        audit["notebook_refactor"] = {
+            "changed_notebooks": list(notebook_changes),
+            "created_issues": [
+                {"id": issue.issue_id, "title": issue.title}
+                for issue in (notebook_refactor.created_issues if notebook_refactor else ())
+            ],
+            "enabled": enable_notebook_refactors,
+            "limit": notebook_refactor_limit,
+        }
         created_issues_payload: list[dict[str, str]] = []
         if is_first_planning_pass:
-            overlay = load_contract_overlay(
-                overlay_path,
-                repo_policy=repo_policy,
-                known_bead_ids=known_bead_ids,
-            )
             enabled = bool(overlay.defaults.enable_planning_audit_issue_creation or False)
             limit = int(overlay.defaults.planning_audit_issue_limit or 0)
             if enabled and limit > 0:

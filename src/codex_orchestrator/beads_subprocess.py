@@ -23,6 +23,13 @@ class BdIssue:
     dependents: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class BdIssueSummary:
+    issue_id: str
+    title: str
+    status: str
+
+
 def _run_bd(
     args: Sequence[str],
     *,
@@ -139,6 +146,42 @@ def bd_ready(*, repo_root: Path) -> list[ReadyBead]:
     return out
 
 
+def bd_list(*, repo_root: Path) -> tuple[BdIssueSummary, ...]:
+    data = _parse_json_output(_run_bd(["list", "--json"], cwd=repo_root))
+    if data is None:
+        return ()
+    if not isinstance(data, list):
+        raise BdCliError(f"bd list --json: expected a list, got {type(data).__name__}")
+
+    out: list[BdIssueSummary] = []
+    for idx, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise BdCliError(
+                f"bd list --json: expected objects, got {type(item).__name__} at index {idx}"
+            )
+        issue_id = item.get("id")
+        title = item.get("title")
+        status = item.get("status")
+        if not isinstance(issue_id, str) or not issue_id.strip():
+            raise BdCliError(f"bd list --json: missing string id at index {idx}")
+
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(status, str)
+            or not status.strip()
+        ):
+            issue = bd_show(repo_root=repo_root, issue_id=issue_id)
+            title = issue.title
+            status = issue.status
+
+        out.append(
+            BdIssueSummary(issue_id=issue_id, title=str(title), status=str(status))
+        )
+
+    return tuple(out)
+
+
 def bd_list_ids(*, repo_root: Path) -> set[str]:
     data = _parse_json_output(_run_bd(["list", "--json"], cwd=repo_root))
     if data is None:
@@ -230,7 +273,39 @@ def bd_create(
     title: str,
     issue_type: str = "task",
     priority: int = 2,
+    labels: tuple[str, ...] | None = None,
+    description: str | None = None,
+    acceptance_criteria: str | None = None,
+    design: str | None = None,
+    estimate_minutes: int | None = None,
+    deps: tuple[str, ...] | None = None,
 ) -> BdIssue:
-    args: list[str] = ["create", title, "-t", issue_type, "-p", str(priority), "--json"]
+    args: list[str] = ["create", title, "-t", issue_type, "-p", str(priority)]
+    if labels:
+        args.extend(["--labels", ",".join(labels)])
+    if description is not None:
+        args.extend(["--description", description])
+    if acceptance_criteria is not None:
+        args.extend(["--acceptance", acceptance_criteria])
+    if design is not None:
+        args.extend(["--design", design])
+    if estimate_minutes is not None and estimate_minutes > 0:
+        args.extend(["--estimate", str(estimate_minutes)])
+    if deps:
+        args.extend(["--deps", ",".join(deps)])
+    args.append("--json")
     data = _parse_json_output(_run_bd(args, cwd=repo_root))
     return _parse_issue(data, context="bd create --json")
+
+
+def bd_dep_add(
+    *,
+    repo_root: Path,
+    issue_id: str,
+    depends_on_id: str,
+    dep_type: str = "blocks",
+) -> None:
+    _run_bd(
+        ["dep", "add", issue_id, depends_on_id, "-t", dep_type, "--json"],
+        cwd=repo_root,
+    )
