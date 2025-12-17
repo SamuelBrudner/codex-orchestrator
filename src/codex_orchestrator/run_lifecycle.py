@@ -12,6 +12,11 @@ from typing import Any
 from codex_orchestrator.night_window import DEFAULT_NIGHT_WINDOW
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.run_lock import RunLock, RunLockError
+from codex_orchestrator.run_signoff import (
+    RunSignoffError,
+    find_latest_ended_run_id,
+    validate_run_signoff,
+)
 from codex_orchestrator.run_state import CurrentRunState, RunMode, RunStateError
 
 
@@ -114,6 +119,54 @@ def _require_held_run_lock(paths: OrchestratorPaths, *, run_lock: RunLock) -> No
         )
 
 
+def _format_latest_ended_run_lookup_error(paths: OrchestratorPaths, *, error: RunSignoffError) -> str:
+    lines = [
+        "Refusing to start a new run: unable to determine the latest ended run.",
+        f"error={error}",
+        "next_action=Inspect run_end.json under the runs directory and fix/remove corrupt artifacts.",
+        f"runs_dir={paths.runs_dir}",
+    ]
+    return "\n".join(lines)
+
+
+def _format_latest_run_not_signed_off_error(
+    paths: OrchestratorPaths, *, run_id: str, error: RunSignoffError
+) -> str:
+    final_review_path = paths.final_review_json_path(run_id)
+    signoff_json_path = paths.run_signoff_json_path(run_id)
+    lines = [
+        "Refusing to start a new run: the latest ended run is not signed off.",
+        f"latest_ended_run_id={run_id}",
+        f"final_review={final_review_path}",
+        f"expected_signoff={signoff_json_path}",
+        f"signoff_error={error}",
+        "next_action=Review final_review.json then sign off the run:",
+        f"  codex-orchestrator signoff --run-id {run_id} --reviewer <name>",
+    ]
+    return "\n".join(lines)
+
+
+def _latest_ended_run_id_or_raise(paths: OrchestratorPaths) -> str | None:
+    try:
+        return find_latest_ended_run_id(paths)
+    except RunSignoffError as e:
+        raise RunLifecycleError(_format_latest_ended_run_lookup_error(paths, error=e)) from e
+
+
+def _validate_run_signed_off_or_raise(paths: OrchestratorPaths, *, run_id: str) -> None:
+    try:
+        validate_run_signoff(paths, run_id=run_id)
+    except RunSignoffError as e:
+        raise RunLifecycleError(_format_latest_run_not_signed_off_error(paths, run_id=run_id, error=e)) from e
+
+
+def _require_latest_ended_run_signed_off(paths: OrchestratorPaths) -> None:
+    latest_ended_run_id = _latest_ended_run_id_or_raise(paths)
+    if latest_ended_run_id is None:
+        return
+    _validate_run_signed_off_or_raise(paths, run_id=latest_ended_run_id)
+
+
 def _tick_run_locked(
     *,
     paths: OrchestratorPaths,
@@ -159,6 +212,7 @@ def _tick_run_locked(
                 end_reason="outside_window",
                 state=None,
             )
+        _require_latest_ended_run_signed_off(paths)
         started_new = True
         run_id = _generate_run_id(now=now)
         window_end_at = DEFAULT_NIGHT_WINDOW.end_for(now) if mode == "automated" else None
@@ -323,6 +377,7 @@ def ensure_active_run(
                 state=None,
             )
 
+        _require_latest_ended_run_signed_off(paths)
         run_id = _generate_run_id(now=now)
         window_end_at = DEFAULT_NIGHT_WINDOW.end_for(now) if mode == "automated" else None
         expires_at = window_end_at if window_end_at is not None else now + manual_ttl
