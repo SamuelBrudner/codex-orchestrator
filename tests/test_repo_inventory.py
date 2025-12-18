@@ -115,3 +115,56 @@ def test_select_repo_ids_union_and_default_all(tmp_path: Path) -> None:
     assert inv.select_repo_ids(repo_groups=["grp"]) == ["a_repo"]
     assert inv.select_repo_ids(repo_ids=["b_repo"], repo_groups=["grp"]) == ["a_repo", "b_repo"]
 
+
+def test_load_repo_inventory_requires_orchestrator_outputs_in_allowed_roots(tmp_path: Path) -> None:
+    repo_a = tmp_path / "a"
+    repo_a.mkdir()
+
+    cfg = tmp_path / "repos.toml"
+    _write_config(
+        cfg,
+        "\n".join(
+            [
+                "[repos.a_repo]",
+                f'path = "{repo_a.as_posix()}"',
+                'base_branch = "main"',
+                'allowed_roots = ["src"]',
+                "",
+            ]
+        ),
+    )
+
+    with pytest.raises(RepoConfigError) as excinfo:
+        load_repo_inventory(cfg)
+
+    message = str(excinfo.value)
+    assert "allowed_roots" in message
+    assert ".beads" in message
+    assert "docs/runs" in message
+
+
+def test_load_repo_inventory_denies_cannot_cover_orchestrator_outputs(tmp_path: Path) -> None:
+    repo_a = tmp_path / "a"
+    repo_a.mkdir()
+
+    cfg = tmp_path / "repos.toml"
+    _write_config(
+        cfg,
+        "\n".join(
+            [
+                "[repos.a_repo]",
+                f'path = "{repo_a.as_posix()}"',
+                'base_branch = "main"',
+                'allowed_roots = ["."]',
+                'deny_roots = ["docs"]',
+                "",
+            ]
+        ),
+    )
+
+    with pytest.raises(RepoConfigError) as excinfo:
+        load_repo_inventory(cfg)
+
+    message = str(excinfo.value)
+    assert "deny_roots" in message
+    assert "docs/runs" in message

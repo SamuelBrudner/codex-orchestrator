@@ -12,6 +12,69 @@ class RepoConfigError(ValueError):
     pass
 
 
+_REQUIRED_ORCHESTRATOR_OUTPUT_ROOTS: tuple[Path, ...] = (
+    Path(".beads"),
+    Path("docs/runs"),
+)
+
+
+def _within(path: Path, root: Path) -> bool:
+    if root == Path(".") or root == Path():
+        return True
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _first_covering_root(target: Path, roots: tuple[Path, ...]) -> Path | None:
+    for root in roots:
+        if _within(target, root):
+            return root
+    return None
+
+
+def _validate_required_output_root(
+    *,
+    repo_id: str,
+    required_root: Path,
+    allowed_roots: tuple[Path, ...],
+    deny_roots: tuple[Path, ...],
+    errors: list[str],
+) -> None:
+    deny_match = _first_covering_root(required_root, deny_roots)
+    if deny_match is not None:
+        errors.append(
+            f"repos.{repo_id}.deny_roots: must not cover orchestrator output "
+            f"{required_root.as_posix()!r} (denied by {deny_match.as_posix()!r})"
+        )
+
+    allow_match = _first_covering_root(required_root, allowed_roots)
+    if allow_match is None:
+        errors.append(
+            f"repos.{repo_id}.allowed_roots: must include orchestrator output "
+            f"{required_root.as_posix()!r} (or a parent like '.' or {required_root.parent.as_posix()!r})"
+        )
+
+
+def _validate_orchestrator_outputs_policy(
+    *,
+    repo_id: str,
+    allowed_roots: tuple[Path, ...],
+    deny_roots: tuple[Path, ...],
+    errors: list[str],
+) -> None:
+    for required_root in _REQUIRED_ORCHESTRATOR_OUTPUT_ROOTS:
+        _validate_required_output_root(
+            repo_id=repo_id,
+            required_root=required_root,
+            allowed_roots=allowed_roots,
+            deny_roots=deny_roots,
+            errors=errors,
+        )
+
+
 def _toml_load(path: Path) -> dict[str, Any]:
     try:
         import tomllib  # pyright: ignore[reportMissingImports]
@@ -298,6 +361,12 @@ def load_repo_inventory(config_path: Path) -> RepoInventory:
             deny_roots=deny_roots,
             validation_commands=validation_commands,
             notebook_output_policy=notebook_output_policy,
+        )
+        _validate_orchestrator_outputs_policy(
+            repo_id=repo_id,
+            allowed_roots=allowed_roots,
+            deny_roots=deny_roots,
+            errors=errors,
         )
 
     repo_groups_table = data.get("repo_groups", {})

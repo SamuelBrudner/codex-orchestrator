@@ -6,6 +6,15 @@
 #                  `validation_commands`, `notebook_output_policy`.
 #
 # See `project_spec.md` for policy semantics and resolution order.
+#
+# IMPORTANT: If you restrict `allowed_roots`, you must still allow orchestrator-owned outputs:
+# - `docs/runs/` (repo-local run reports)
+# - `.beads/` (Beads state, when using bd)
+#
+# Pattern (tight allowlist + aggressive denylist):
+#
+# allowed_roots = ["src", "tests", "notebooks", "docs/runs", ".beads"]
+# deny_roots = ["data", "results"]
 
 [repos.plume_grad_motion]
 path = "/Users/samuelbrudner/Yale University Dropbox/Samuel Brudner/plumeGradMotion"
