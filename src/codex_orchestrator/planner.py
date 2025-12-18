@@ -4,14 +4,14 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from codex_orchestrator.contract_overlays import load_contract_overlay
-from codex_orchestrator.contracts import ContractResolutionError, ResolvedExecutionContract
-from codex_orchestrator.contracts import resolve_execution_contract
+from codex_orchestrator.contracts import ContractResolutionError, ResolvedExecutionContract, resolve_execution_contract
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.repo_inventory import RepoPolicy
 

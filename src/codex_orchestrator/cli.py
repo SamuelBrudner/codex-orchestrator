@@ -17,6 +17,7 @@ from codex_orchestrator.contract_overlays import (
     ContractOverlayPatch,
     load_contract_overlay,
 )
+from codex_orchestrator.orchestrator_cycle import OrchestratorCycleError, run_orchestrator_cycle
 from codex_orchestrator.paths import OrchestratorPaths, default_cache_dir
 from codex_orchestrator.planner import plan_deck_items
 from codex_orchestrator.repo_execution import (
@@ -26,7 +27,6 @@ from codex_orchestrator.repo_execution import (
     execute_repo_tick,
 )
 from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
-from codex_orchestrator.orchestrator_cycle import OrchestratorCycleError, run_orchestrator_cycle
 from codex_orchestrator.run_closure_review import (
     RunClosureReviewError,
     run_review_only_codex_pass,

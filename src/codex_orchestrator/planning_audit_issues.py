@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from codex_orchestrator.beads_subprocess import BdIssue, bd_create, bd_list_open_titles, bd_update
 

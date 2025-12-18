@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from codex_orchestrator.contract_overlays import ContractOverlay
 from codex_orchestrator.repo_inventory import NotebookOutputPolicy, RepoPolicy

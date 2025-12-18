@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 from codex_orchestrator.ai_policy import (
-    AiPolicyError,
     REQUIRED_CODEX_MODEL,
     REQUIRED_REASONING_EFFORT,
+    AiPolicyError,
     enforce_unattended_ai_policy,
     load_ai_settings,
 )

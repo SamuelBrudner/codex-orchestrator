@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from codex_orchestrator.ai_policy import AiSettings, codex_cli_args_for_settings
 from codex_orchestrator.audit_trail import write_json_atomic

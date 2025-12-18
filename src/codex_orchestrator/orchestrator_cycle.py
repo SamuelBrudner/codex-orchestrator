@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Sequence
 
 from codex_orchestrator.ai_policy import AiSettings
 from codex_orchestrator.paths import OrchestratorPaths
@@ -16,13 +16,13 @@ from codex_orchestrator.repo_execution import (
     execute_repos_tick,
 )
 from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
-from codex_orchestrator.run_lifecycle import TickResult, ensure_active_run, tick_run
-from codex_orchestrator.run_lock import RunLock, RunLockError
 from codex_orchestrator.run_closure_review import (
     RunClosureReviewError,
     run_review_only_codex_pass,
     write_final_review,
 )
+from codex_orchestrator.run_lifecycle import TickResult, ensure_active_run, tick_run
+from codex_orchestrator.run_lock import RunLock, RunLockError
 from codex_orchestrator.run_state import RunMode
 
 

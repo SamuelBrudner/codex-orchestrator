@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
 
 from codex_orchestrator.planner import ValidationResult
 

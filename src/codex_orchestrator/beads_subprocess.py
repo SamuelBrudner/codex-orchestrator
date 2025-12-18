@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from codex_orchestrator.planner import ReadyBead
 
