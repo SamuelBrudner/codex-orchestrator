@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -284,6 +285,8 @@ def _infer_next_action(
             return "Fix failing validation(s) and re-run."
         if "No behavioral test" in detail:
             return "Add/enable a behavioral test command in validation_commands and re-run."
+        if "Given/When/Then" in detail:
+            return "Add Given/When/Then markers to modified tests and re-run."
         if "Diff cap exceeded" in detail:
             return "Reduce scope or raise diff caps and re-run."
         if "Safety boundary violation" in detail:
@@ -333,6 +336,76 @@ def _count_lines_limited(path: Path, *, byte_limit: int = 2_000_000) -> int:
     except Exception:
         return 0
     return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+
+
+_GWT_GIVEN_RE = re.compile(
+    r"^[ \t]*(?:#|//|--|;|\*+|/\*+|<!--)?[ \t]*given\b",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+_GWT_WHEN_RE = re.compile(
+    r"^[ \t]*(?:#|//|--|;|\*+|/\*+|<!--)?[ \t]*when\b",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+_GWT_THEN_RE = re.compile(
+    r"^[ \t]*(?:#|//|--|;|\*+|/\*+|<!--)?[ \t]*then\b",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _read_text_limited(path: Path, *, byte_limit: int = 2_000_000) -> str:
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return ""
+    if len(data) > byte_limit:
+        data = data[:byte_limit]
+    try:
+        return data.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _is_probable_test_path(path: str) -> bool:
+    p = Path(path)
+    name = p.name.lower()
+    if not name or name in {"__init__.py", "conftest.py"}:
+        return False
+
+    if name.startswith("test_"):
+        return True
+    if name.endswith("_test.py") or name.endswith("_test.go") or name.endswith("_spec.rb"):
+        return True
+    if ".test." in name or ".spec." in name:
+        return True
+
+    parts_lower = {part.lower() for part in p.parts}
+    if "__tests__" in parts_lower:
+        return name.endswith((".js", ".jsx", ".ts", ".tsx"))
+
+    return False
+
+
+def _tests_missing_given_when_then(*, repo_root: Path, changed_paths: Sequence[str]) -> list[str]:
+    missing: list[str] = []
+    for raw in changed_paths:
+        if not _is_probable_test_path(raw):
+            continue
+        path = repo_root / raw
+        if not path.exists() or not path.is_file():
+            continue
+        text = _read_text_limited(path)
+        if not text:
+            missing.append(raw)
+            continue
+        if not (
+            _GWT_GIVEN_RE.search(text)
+            and _GWT_WHEN_RE.search(text)
+            and _GWT_THEN_RE.search(text)
+        ):
+            missing.append(raw)
+    return missing
 
 
 def _diff_stats(*, repo_root: Path) -> tuple[int, int, tuple[str, ...]]:
@@ -1294,6 +1367,50 @@ def execute_repo_tick(
                     stop_reason = "blocked"
                     maybe_write_repo_report(branch=run_branch)
                     break
+
+                if item.contract.enforce_given_when_then:
+                    missing_gwt = _tests_missing_given_when_then(
+                        repo_root=repo_policy.path,
+                        changed_paths=changed_paths,
+                    )
+                    if missing_gwt:
+                        formatted = "\n".join(f"- {p}" for p in missing_gwt)
+                        bd_update(
+                            repo_root=repo_policy.path,
+                            issue_id=item.bead_id,
+                            notes=(issue.notes + "\n" if issue.notes else "")
+                            + "[orchestrator] Given/When/Then markers missing in modified tests; "
+                            "cannot close.\n"
+                            + formatted,
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome="failed",
+                                detail="Given/When/Then markers missing in modified tests.",
+                            )
+                        )
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": "failed",
+                                "detail": "Given/When/Then markers missing in modified tests.",
+                                "changed_paths": list(changed_paths),
+                                "gwt_missing_paths": missing_gwt,
+                                "validation": {
+                                    cmd: _validation_status(r.exit_code)
+                                    for cmd, r in validation_results.items()
+                                },
+                            }
+                        )
+                        repo_failures.append(
+                            f"{item.bead_id}: Given/When/Then markers missing in modified tests."
+                        )
+                        stop_reason = "blocked"
+                        maybe_write_repo_report(branch=run_branch)
+                        break
 
                 for p in changed_paths:
                     if p.endswith(".ipynb"):

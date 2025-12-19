@@ -116,6 +116,7 @@ class ContractOverlayPatch:
     env: str | None = None
     allow_env_creation: bool | None = None
     requires_notebook_execution: bool | None = None
+    enforce_given_when_then: bool | None = None
     enable_planning_audit_issue_creation: bool | None = None
     planning_audit_issue_limit: int | None = None
     enable_notebook_refactor_issue_creation: bool | None = None
@@ -138,6 +139,7 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
         "env",
         "allow_env_creation",
         "requires_notebook_execution",
+        "enforce_given_when_then",
         "enable_planning_audit_issue_creation",
         "planning_audit_issue_limit",
         "enable_notebook_refactor_issue_creation",
@@ -176,6 +178,11 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
     requires_notebook_execution = _as_bool(
         table.get("requires_notebook_execution"),
         field=f"{prefix}.requires_notebook_execution",
+        errors=errors,
+    )
+    enforce_given_when_then = _as_bool(
+        table.get("enforce_given_when_then"),
+        field=f"{prefix}.enforce_given_when_then",
         errors=errors,
     )
     enable_planning_audit_issue_creation = _as_bool(
@@ -225,6 +232,7 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
         env=env,
         allow_env_creation=allow_env_creation,
         requires_notebook_execution=requires_notebook_execution,
+        enforce_given_when_then=enforce_given_when_then,
         enable_planning_audit_issue_creation=enable_planning_audit_issue_creation,
         planning_audit_issue_limit=planning_audit_issue_limit,
         enable_notebook_refactor_issue_creation=enable_notebook_refactor_issue_creation,

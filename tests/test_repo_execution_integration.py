@@ -117,6 +117,7 @@ def _write_fake_codex(bin_dir: Path) -> None:
                 "#!/usr/bin/env python3",
                 "from __future__ import annotations",
                 "import json",
+                "import os",
                 "import sys",
                 "from pathlib import Path",
                 "",
@@ -129,6 +130,17 @@ def _write_fake_codex(bin_dir: Path) -> None:
                 "    prompt = sys.stdin.read()",
                 "    Path('.fake_codex_prompt.txt').write_text(prompt, encoding='utf-8')",
                 "    Path('work.txt').write_text('hello\\n', encoding='utf-8')",
+                "    if os.environ.get('FAKE_CODEX_EDIT_TEST_FILE') == '1':",
+                "        p = Path('test_dummy.py')",
+                "        text = p.read_text(encoding='utf-8') if p.exists() else ''",
+                "        if os.environ.get('FAKE_CODEX_ADD_GWT') == '1':",
+                "            markers = '# Given\\n# When\\n# Then\\n'",
+                "            if markers not in text:",
+                "                text = markers + text",
+                "        if not text.endswith('\\n'):",
+                "            text += '\\n'",
+                "        text += '# touched\\n'",
+                "        p.write_text(text, encoding='utf-8')",
                 "    print('ok')",
                 "    return 0",
                 "",
@@ -400,3 +412,143 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     assert "-n" in run_calls[0]
     assert run_calls[0][run_calls[0].index("-n") + 1] == "test"
     assert "pytest" in run_calls[0]
+
+
+@pytest.mark.parametrize(
+    ("enforce_gwt", "add_markers", "expect_closed"),
+    [
+        (False, False, True),
+        (True, False, False),
+        (True, True, True),
+    ],
+)
+def test_execute_repo_tick_given_when_then_enforcement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enforce_gwt: bool,
+    add_markers: bool,
+    expect_closed: bool,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _git(repo_root, "init", "-b", "main")
+    _git(repo_root, "config", "user.name", "Test")
+    _git(repo_root, "config", "user.email", "test@example.com")
+    (repo_root / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+    (repo_root / "test_dummy.py").write_text(
+        "def test_ok():\n    assert 1 + 1 == 2\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "init")
+
+    (repo_root / ".fake_beads.json").write_text(
+        json.dumps(
+            {
+                "bd-1": {
+                    "id": "bd-1",
+                    "title": "Test bead",
+                    "status": "open",
+                    "notes": "",
+                    "dependencies": [],
+                    "dependents": [],
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", ".fake_beads.json")
+    _git(repo_root, "commit", "-m", "beads init")
+
+    cache_dir = tmp_path / "cache"
+    paths = OrchestratorPaths(cache_dir=cache_dir)
+    run_id = "20250101-000000-deadbeef"
+
+    contract = ResolvedExecutionContract(
+        time_budget_minutes=10,
+        validation_commands=("pytest -q",),
+        env="test",
+        allow_env_creation=False,
+        requires_notebook_execution=False,
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        notebook_roots=(Path("."),),
+        notebook_output_policy="strip",
+        enforce_given_when_then=enforce_gwt,
+    )
+    baseline = ValidationResult(
+        command="pytest -q",
+        exit_code=0,
+        started_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        stdout="",
+        stderr="",
+    )
+    deck = RunDeck(
+        schema_version=2,
+        run_id=run_id,
+        repo_id="test_repo",
+        created_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        items=(
+            RunDeckItem(
+                bead_id="bd-1",
+                title="Test bead",
+                contract=contract,
+                baseline_validation=(baseline,),
+            ),
+        ),
+    )
+    write_run_deck(paths, deck=deck)
+
+    policy = RepoPolicy(
+        repo_id="test_repo",
+        path=repo_root,
+        base_branch="main",
+        env=None,
+        notebook_roots=(Path("."),),
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        validation_commands=("pytest -q",),
+        notebook_output_policy="strip",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_bd(bin_dir)
+    _write_fake_codex(bin_dir)
+    _write_fake_conda(bin_dir)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setenv("FAKE_CODEX_EDIT_TEST_FILE", "1")
+    if add_markers:
+        monkeypatch.setenv("FAKE_CODEX_ADD_GWT", "1")
+    else:
+        monkeypatch.delenv("FAKE_CODEX_ADD_GWT", raising=False)
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=45))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=45),
+            min_minutes_to_start_new_bead=15,
+            max_beads_per_tick=3,
+            diff_caps=DiffCaps(max_files_changed=10, max_lines_added=100),
+        ),
+    )
+
+    issues = json.loads((repo_root / ".fake_beads.json").read_text(encoding="utf-8"))
+    if expect_closed:
+        assert result.beads_closed == 1
+        assert issues["bd-1"]["status"] == "closed"
+    else:
+        assert result.beads_closed == 0
+        assert result.stop_reason == "blocked"
+        assert issues["bd-1"]["status"] == "in_progress"
+        assert "Given/When/Then" in issues["bd-1"]["notes"]

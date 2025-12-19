@@ -289,6 +289,15 @@ Constraints:
 ### 6.7 Testing Policy
 
 * Given/When/Then enforcement is checked via linting or simple pattern checks in tests.
+  * Optional repo/bead contract key: `enforce_given_when_then = true` in `config/bead_contracts/<repo_id>.toml`.
+  * When enabled, the orchestrator fails the close gate if any **new/modified test files** lack `Given`, `When`, and `Then` markers (line-start markers; case-insensitive; comment prefixes like `#`/`//` allowed).
+
+Example:
+
+```toml
+[defaults]
+enforce_given_when_then = true
+```
 * Baseline failing tests are recorded by the planner; beads cannot close unless failures are scoped or fixed.
 * Minimum close gate: declared validation commands pass plus at least one behavioral test.
 

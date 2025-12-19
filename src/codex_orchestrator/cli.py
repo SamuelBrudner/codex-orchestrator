@@ -451,6 +451,11 @@ def _render_overlay_patch_lines(patch: ContractOverlayPatch) -> list[str]:
             "requires_notebook_execution = "
             f"{'true' if patch.requires_notebook_execution else 'false'}"
         )
+    if patch.enforce_given_when_then is not None:
+        lines.append(
+            "enforce_given_when_then = "
+            f"{'true' if patch.enforce_given_when_then else 'false'}"
+        )
     if patch.enable_planning_audit_issue_creation is not None:
         lines.append(
             "enable_planning_audit_issue_creation = "

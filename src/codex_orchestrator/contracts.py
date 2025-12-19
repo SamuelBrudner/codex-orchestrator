@@ -39,6 +39,7 @@ class ResolvedExecutionContract:
     deny_roots: tuple[Path, ...]
     notebook_roots: tuple[Path, ...]
     notebook_output_policy: NotebookOutputPolicy
+    enforce_given_when_then: bool = False
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +52,7 @@ class ResolvedExecutionContract:
             "deny_roots": [p.as_posix() for p in self.deny_roots],
             "notebook_roots": [p.as_posix() for p in self.notebook_roots],
             "notebook_output_policy": self.notebook_output_policy,
+            "enforce_given_when_then": self.enforce_given_when_then,
         }
 
     @classmethod
@@ -108,6 +110,12 @@ class ResolvedExecutionContract:
         requires_notebook_execution = _expect_bool(
             data.get("requires_notebook_execution"), field="requires_notebook_execution"
         )
+        enforce_given_when_then_raw = data.get("enforce_given_when_then", False)
+        if enforce_given_when_then_raw is None:
+            enforce_given_when_then_raw = False
+        enforce_given_when_then = _expect_bool(
+            enforce_given_when_then_raw, field="enforce_given_when_then"
+        )
         allowed_roots = _expect_path_list(data.get("allowed_roots"), field="allowed_roots")
         deny_roots = _expect_path_list(data.get("deny_roots"), field="deny_roots")
         notebook_roots = _expect_path_list(data.get("notebook_roots"), field="notebook_roots")
@@ -130,6 +138,7 @@ class ResolvedExecutionContract:
             deny_roots=deny_roots,
             notebook_roots=notebook_roots,
             notebook_output_policy=notebook_output_policy,  # type: ignore[arg-type]
+            enforce_given_when_then=enforce_given_when_then,
         )
 
 
@@ -172,6 +181,10 @@ def resolve_execution_contract(
     requires_notebook_execution = _pick("requires_notebook_execution")
     if requires_notebook_execution is None:
         missing.append("requires_notebook_execution")
+
+    enforce_given_when_then = _pick("enforce_given_when_then")
+    if enforce_given_when_then is None:
+        enforce_given_when_then = False
 
     env = _pick("env")
     if env is None:
@@ -219,4 +232,5 @@ def resolve_execution_contract(
         deny_roots=tuple(deny_roots),
         notebook_roots=repo_policy.notebook_roots,
         notebook_output_policy=repo_policy.notebook_output_policy,
+        enforce_given_when_then=bool(enforce_given_when_then),
     )
