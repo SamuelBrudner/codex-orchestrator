@@ -232,14 +232,13 @@ def main(argv: list[str] | None = None) -> int:
             break
 
         tick = cycle_result.tick_result
-        if tick is not None:
-            for repo_id, repo_result in tick.repo_results.items():
-                beads_done = len([b for b in repo_result.bead_results if b.outcome == "completed"])
-                beads_failed = len([b for b in repo_result.bead_results if b.outcome == "failed"])
-                print(f"  repo={repo_id} beads_completed={beads_done} beads_failed={beads_failed}")
-            if tick.ended:
-                print(f"codex-roadtrip: tick ended run, reason={tick.end_reason}")
-                break
+        for repo_result in cycle_result.repo_results:
+            beads_done = len([b for b in repo_result.bead_results if b.outcome == "completed"])
+            beads_failed = len([b for b in repo_result.bead_results if b.outcome == "failed"])
+            print(f"  repo={repo_result.repo_id} beads_completed={beads_done} beads_failed={beads_failed}")
+        if tick is not None and tick.ended:
+            print(f"codex-roadtrip: tick ended run, reason={tick.end_reason}")
+            break
 
         next_cycle_at = now + timedelta(minutes=cadence_minutes)
         print(f"codex-roadtrip: next tick at {next_cycle_at.strftime('%H:%M:%S')}")
