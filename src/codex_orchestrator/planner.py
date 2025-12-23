@@ -26,6 +26,8 @@ class PlannerError(RuntimeError):
 class ReadyBead:
     bead_id: str
     title: str
+    labels: tuple[str, ...] = ()
+    description: str = ""
 
 
 @dataclass(frozen=True, slots=True)

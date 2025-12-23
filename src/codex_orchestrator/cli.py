@@ -325,6 +325,7 @@ def _cmd_exec_repo(args: argparse.Namespace) -> int:
     tick_minutes = float(args.tick_minutes)
     started_at = datetime.now().astimezone()
     tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=tick_minutes))
+    focus = str(args.focus).strip() if args.focus else None
     config = RepoExecutionConfig(
         tick_budget=timedelta(minutes=tick_minutes),
         min_minutes_to_start_new_bead=int(args.min_minutes_to_start_new_bead),
@@ -335,6 +336,7 @@ def _cmd_exec_repo(args: argparse.Namespace) -> int:
         ),
         replan=bool(args.replan),
         ai_settings=ai_settings,
+        focus=focus,
     )
 
     result = execute_repo_tick(
@@ -370,6 +372,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except ValueError as e:
             raise SystemExit(f"codex-orchestrator: invalid MAX_PARALLEL={raw!r} (expected int)") from e
 
+    focus = str(args.focus).strip() if args.focus else None
     try:
         result = run_orchestrator_cycle(
             cache_dir=cache_dir,
@@ -389,6 +392,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             diff_cap_lines=int(args.diff_cap_lines),
             replan=bool(args.replan),
             final_review_codex_review=bool(args.final_review_codex),
+            focus=focus,
         )
     except (OrchestratorCycleError, RunLifecycleError) as e:
         raise SystemExit(f"codex-orchestrator: {e}") from e
@@ -788,6 +792,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="After ending a run, optionally run a review-only Codex pass (must produce zero diffs).",
     )
+    run_parser.add_argument(
+        "--focus",
+        default=None,
+        help="Natural language focus area for the run (interpreted by Codex during execution).",
+    )
     run_parser.set_defaults(func=_cmd_run)
 
     exec_repo_parser = subparsers.add_parser("exec-repo", help="Execute one repo deck tick.")
@@ -823,6 +832,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--replan",
         action="store_true",
         help="Recompute the run deck even if one already exists for this RUN_ID+repo_id.",
+    )
+    exec_repo_parser.add_argument(
+        "--focus",
+        default=None,
+        help="Natural language focus area for the run (interpreted by Codex during execution).",
     )
     exec_repo_parser.set_defaults(func=_cmd_exec_repo)
 

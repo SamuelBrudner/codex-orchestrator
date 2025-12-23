@@ -143,6 +143,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="After ending a run, optionally run a review-only Codex pass (must produce zero diffs).",
     )
+    p.add_argument(
+        "--focus",
+        default=None,
+        help="Natural language focus area for the run (interpreted by Codex during execution).",
+    )
     return p
 
 
@@ -190,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
                 time.sleep(sleep_seconds)
             now = datetime.now().astimezone()
 
+        focus = str(args.focus).strip() if args.focus else None
         try:
             cycle_result = run_orchestrator_cycle(
                 cache_dir=cache_dir,
@@ -210,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
                 replan=bool(args.replan),
                 final_review_codex_review=bool(args.final_review_codex),
                 now=now,
+                focus=focus,
             )
         except (OrchestratorCycleError, RunLifecycleError) as e:
             raise SystemExit(f"codex-roadtrip: {e}") from e

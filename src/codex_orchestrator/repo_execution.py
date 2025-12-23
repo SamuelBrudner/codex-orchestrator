@@ -100,6 +100,7 @@ class RepoExecutionConfig:
         model=REQUIRED_CODEX_MODEL,
         reasoning_effort=REQUIRED_REASONING_EFFORT,
     )
+    focus: str | None = None
 
 
 DEFAULT_REPO_EXECUTION_CONFIG = RepoExecutionConfig()
@@ -204,44 +205,59 @@ def _format_codex_prompt(
     run_id: str,
     repo_policy: RepoPolicy,
     item: RunDeckItem,
+    focus: str | None = None,
 ) -> str:
     contract = item.contract
     allowed_roots = ", ".join(p.as_posix() for p in contract.allowed_roots)
     deny_roots = ", ".join(p.as_posix() for p in contract.deny_roots) or "<none>"
     validation = "\n".join(f"- {c}" for c in contract.validation_commands) or "<none>"
-    return "\n".join(
-        [
-            "You are working in a local git repository under an orchestrated run.",
+
+    lines = [
+        "You are working in a local git repository under an orchestrated run.",
+        "",
+        f"RUN_ID: {run_id}",
+        f"REPO_ID: {repo_policy.repo_id}",
+        f"BRANCH: run/{run_id}",
+        "",
+        f"BEAD: {item.bead_id} — {item.title}",
+    ]
+
+    if focus:
+        lines.extend([
             "",
-            f"RUN_ID: {run_id}",
-            f"REPO_ID: {repo_policy.repo_id}",
-            f"BRANCH: run/{run_id}",
+            "Focus area for this run:",
+            f"{focus}",
             "",
-            f"BEAD: {item.bead_id} — {item.title}",
-            "",
-            "Constraints:",
-            f"- Time budget: {contract.time_budget_minutes} minutes",
-            f"- Allowed roots: {allowed_roots}",
-            f"- Deny roots: {deny_roots}",
-            "- Do not edit files outside allowed roots or under deny roots.",
-            "- Do not create git commits; the orchestrator will commit.",
-            "",
-            "Validation commands (must pass to close):",
-            validation,
-            "",
-            "Task:",
-            f"- Complete bead {item.bead_id} ({item.title}) conservatively.",
-            "- Make the minimal safe changes needed.",
-            "- Ensure validation commands pass.",
-            "",
-            "Style:",
-            "- Prefer idiomatic, readable code; avoid deep nesting.",
-            "- In pandas: prefer method chaining and `DataFrame.query(...)`",
-            "  over temporary boolean masks, and avoid intermediate filtered DataFrames.",
-            "- For seaborn/matplotlib: prefer passing filtered data inline",
-            "  (e.g. `sns.someplot(data=df.query(\"...\"), ...)`).",
-        ]
-    )
+            "Prioritize work that aligns with this focus. Interpret it semantically —",
+            "the focus describes a domain or goal, not exact keywords.",
+        ])
+
+    lines.extend([
+        "",
+        "Constraints:",
+        f"- Time budget: {contract.time_budget_minutes} minutes",
+        f"- Allowed roots: {allowed_roots}",
+        f"- Deny roots: {deny_roots}",
+        "- Do not edit files outside allowed roots or under deny roots.",
+        "- Do not create git commits; the orchestrator will commit.",
+        "",
+        "Validation commands (must pass to close):",
+        validation,
+        "",
+        "Task:",
+        f"- Complete bead {item.bead_id} ({item.title}) conservatively.",
+        "- Make the minimal safe changes needed.",
+        "- Ensure validation commands pass.",
+        "",
+        "Style:",
+        "- Prefer idiomatic, readable code; avoid deep nesting.",
+        "- In pandas: prefer method chaining and `DataFrame.query(...)`",
+        "  over temporary boolean masks, and avoid intermediate filtered DataFrames.",
+        "- For seaborn/matplotlib: prefer passing filtered data inline",
+        "  (e.g. `sns.someplot(data=df.query(\"...\"), ...)`).",
+    ])
+
+    return "\n".join(lines)
 
 
 def _append_log(path: Path, message: str) -> None:
@@ -911,6 +927,7 @@ def execute_repo_tick(
                     run_id=run_id,
                     repo_policy=repo_policy,
                     item=item,
+                    focus=config.focus,
                 )
                 timeout_seconds = max(
                     60.0,

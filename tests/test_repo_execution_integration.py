@@ -360,7 +360,7 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     codex_argv = json.loads((repo_root / ".fake_codex_argv.json").read_text(encoding="utf-8"))
     assert "--full-auto" in codex_argv
     assert "--model" in codex_argv
-    assert codex_argv[codex_argv.index("--model") + 1] == "gpt-5.2"
+    assert codex_argv[codex_argv.index("--model") + 1] == "gpt-5.2-codex"
     assert "-c" in codex_argv
     assert codex_argv[codex_argv.index("-c") + 1] == 'reasoning_effort="xhigh"'
 
@@ -378,7 +378,7 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     assert f"`{audit_md_rel}`" in report_text
     assert "(missing)" in report_text
     assert "## AI Configuration" in report_text
-    assert "- Model: `gpt-5.2`" in report_text
+    assert "- Model: `gpt-5.2-codex`" in report_text
     assert "- Reasoning effort: `xhigh`" in report_text
     assert "reasoning_effort=\"xhigh\"" in report_text
 

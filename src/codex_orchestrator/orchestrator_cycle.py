@@ -57,6 +57,7 @@ def run_orchestrator_cycle(
     replan: bool = False,
     final_review_codex_review: bool = False,
     now: datetime | None = None,
+    focus: str | None = None,
 ) -> OrchestratorCycleResult:
     if max_parallel < 1:
         raise OrchestratorCycleError(f"max_parallel must be >= 1, got {max_parallel}")
@@ -119,6 +120,7 @@ def run_orchestrator_cycle(
                 ),
                 replan=replan,
                 ai_settings=ai_settings,
+                focus=focus,
             )
 
             repo_results = execute_repos_tick(
