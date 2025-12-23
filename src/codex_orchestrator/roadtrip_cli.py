@@ -185,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_id: str | None = None
     next_cycle_at = started_at
+    print(f"codex-roadtrip: starting, will run until {end_at.isoformat()}")
     while True:
         now = datetime.now().astimezone()
         if now >= end_at:
@@ -224,13 +225,24 @@ def main(argv: list[str] | None = None) -> int:
         ensure = cycle_result.ensure_result
         if ensure.run_id is not None:
             run_id = ensure.run_id
+            print(f"RUN_ID={run_id}")
 
         if ensure.ended:
-            break
-        if cycle_result.tick_result is not None and cycle_result.tick_result.ended:
+            print(f"codex-roadtrip: run ended, reason={ensure.end_reason}")
             break
 
+        tick = cycle_result.tick_result
+        if tick is not None:
+            for repo_id, repo_result in tick.repo_results.items():
+                beads_done = len([b for b in repo_result.bead_results if b.outcome == "completed"])
+                beads_failed = len([b for b in repo_result.bead_results if b.outcome == "failed"])
+                print(f"  repo={repo_id} beads_completed={beads_done} beads_failed={beads_failed}")
+            if tick.ended:
+                print(f"codex-roadtrip: tick ended run, reason={tick.end_reason}")
+                break
+
         next_cycle_at = now + timedelta(minutes=cadence_minutes)
+        print(f"codex-roadtrip: next tick at {next_cycle_at.strftime('%H:%M:%S')}")
 
     if run_id is not None:
         try:
