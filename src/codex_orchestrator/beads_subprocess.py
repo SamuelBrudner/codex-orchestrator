@@ -248,6 +248,11 @@ def bd_list_open_titles(*, repo_root: Path) -> set[str]:
 
 def bd_show(*, repo_root: Path, issue_id: str) -> BdIssue:
     data = _parse_json_output(_run_bd(["show", issue_id, "--json"], cwd=repo_root))
+    # bd show returns a list with a single item
+    if isinstance(data, list):
+        if len(data) != 1:
+            raise BdCliError(f"bd show {issue_id} --json: expected single-item list, got {len(data)} items")
+        data = data[0]
     return _parse_issue(data, context=f"bd show {issue_id} --json")
 
 
