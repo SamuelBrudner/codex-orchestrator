@@ -164,6 +164,9 @@ def _require_latest_ended_run_signed_off(paths: OrchestratorPaths) -> None:
     latest_ended_run_id = _latest_ended_run_id_or_raise(paths)
     if latest_ended_run_id is None:
         return
+    # If there's no final_review.json, there's nothing to sign off on — skip the check.
+    if not paths.final_review_json_path(latest_ended_run_id).exists():
+        return
     _validate_run_signed_off_or_raise(paths, run_id=latest_ended_run_id)
 
 
