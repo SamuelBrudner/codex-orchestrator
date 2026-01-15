@@ -9,6 +9,7 @@ from pathlib import Path
 from codex_orchestrator.audit_trail import write_json_atomic, write_text_atomic
 from codex_orchestrator.beads_subprocess import bd_init, bd_list_ids, bd_ready
 from codex_orchestrator.contract_overlays import load_contract_overlay
+from codex_orchestrator.env_bootstrap import bootstrap_repo_env
 from codex_orchestrator.git_subprocess import GitError
 from codex_orchestrator.notebook_refactor_issues import (
     NotebookRefactorResult,
@@ -169,11 +170,36 @@ def ensure_repo_run_deck(
         known_bead_ids=known_bead_ids,
     )
 
+    baseline_env = _baseline_env(repo_policy, planning)
+    if baseline_env is not None and planning.deck_items:
+        first_contract = planning.deck_items[0].contract
+        logger.info(
+            "Bootstrapping repo env=%s allow_env_creation=%s for repo_id=%s",
+            baseline_env,
+            first_contract.allow_env_creation,
+            repo_policy.repo_id,
+        )
+        bootstrap_result = bootstrap_repo_env(
+            env_name=baseline_env,
+            repo_root=repo_policy.path,
+            allow_env_creation=first_contract.allow_env_creation,
+        )
+        if bootstrap_result.error is not None:
+            raise PlanningPassError(
+                f"Env bootstrap failed for repo_id={repo_policy.repo_id!r}: {bootstrap_result.error}"
+            )
+        logger.info(
+            "Env bootstrap complete: env_existed=%s env_created=%s repo_installed=%s",
+            bootstrap_result.env_existed,
+            bootstrap_result.env_created,
+            bootstrap_result.repo_installed,
+        )
+
     validation_commands = _collect_validation_commands(planning)
     baseline_results_by_command = run_validation_commands(
         validation_commands,
         cwd=repo_policy.path,
-        env=_baseline_env(repo_policy, planning),
+        env=baseline_env,
     )
 
     deck = build_run_deck(

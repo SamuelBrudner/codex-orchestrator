@@ -37,6 +37,25 @@ def _policy(*, tmp_path: Path) -> RepoPolicy:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_bootstrap_repo_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    import codex_orchestrator.planning_pass as planning_pass
+    from codex_orchestrator.env_bootstrap import BootstrapResult
+
+    def _bootstrap_repo_env(*, env_name: str, repo_root: Path, allow_env_creation: bool) -> BootstrapResult:
+        return BootstrapResult(
+            env_name=env_name,
+            env_existed=True,
+            env_created=False,
+            repo_installed=True,
+            install_attempted=True,
+            install_succeeded=True,
+            error=None,
+        )
+
+    monkeypatch.setattr(planning_pass, "bootstrap_repo_env", _bootstrap_repo_env)
+
+
 def test_planning_pass_reuses_existing_deck(tmp_path: Path, monkeypatch) -> None:
     overlay_path = tmp_path / "test_repo.toml"
     _write_overlay(
@@ -552,4 +571,3 @@ def test_planning_pass_creates_notebook_refactor_issues_when_enabled(
         "enabled": True,
         "limit": 2,
     }
-
