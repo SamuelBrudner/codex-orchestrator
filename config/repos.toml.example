@@ -1,0 +1,43 @@
+# Repository inventory for codex-orchestrator.
+#
+# Each repo is keyed by a stable `repo_id` under `[repos.<repo_id>]`.
+# Required fields: `path`, `base_branch`.
+# Optional fields: `env`, `notebook_roots`, `allowed_roots`, `deny_roots`,
+#                  `validation_commands`, `notebook_output_policy`.
+#
+# See `project_spec.md` for policy semantics and resolution order.
+#
+# IMPORTANT: If you restrict `allowed_roots`, you must still allow orchestrator-owned outputs:
+# - `docs/runs/` (repo-local run reports)
+# - `.beads/` (Beads state, when using bd)
+#
+# Pattern (tight allowlist + aggressive denylist):
+#
+# allowed_roots = ["src", "tests", "notebooks", "docs/runs", ".beads"]
+# deny_roots = ["data", "results"]
+
+# Copy this file to `repos.toml` and update with your actual repository paths.
+
+[repos.example_repo]
+path = "/absolute/path/to/your/repository"
+base_branch = "main"
+env = "your_conda_env"
+notebook_roots = ["."]
+allowed_roots = ["."]
+deny_roots = [
+  ".benchmarks",
+  ".idea",
+  ".pytest_cache",
+  ".ruff_cache",
+  "__marimo__",
+  "__pycache__",
+  "data",
+  "datasets",
+  "executed_notebooks",
+  "figs",
+  "figures",
+  "logs",
+  "results",
+]
+validation_commands = ["pytest -q"]
+notebook_output_policy = "strip"

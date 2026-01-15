@@ -208,3 +208,7 @@ __marimo__/
 
 # Windsurf
 .windsurf/
+
+# Local configuration (contains absolute paths and personal info)
+config/repos.toml
+config/orchestrator.toml
