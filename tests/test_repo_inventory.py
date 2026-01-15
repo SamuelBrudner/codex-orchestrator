@@ -168,3 +168,28 @@ def test_load_repo_inventory_denies_cannot_cover_orchestrator_outputs(tmp_path: 
     message = str(excinfo.value)
     assert "deny_roots" in message
     assert "docs/runs" in message
+
+
+def test_load_repo_inventory_parses_dirty_ignore(tmp_path: Path) -> None:
+    repo_a = tmp_path / "a"
+    repo_a.mkdir()
+
+    cfg = tmp_path / "repos.toml"
+    _write_config(
+        cfg,
+        "\n".join(
+            [
+                "[repos.a_repo]",
+                f'path = "{repo_a.as_posix()}"',
+                'base_branch = "main"',
+                'dirty_ignore_globs = [".pytest_cache/**"]',
+                "dirty_cleanup = true",
+                "",
+            ]
+        ),
+    )
+
+    inv = load_repo_inventory(cfg)
+    policy = inv.repos["a_repo"]
+    assert policy.dirty_ignore_globs == (".pytest_cache/**",)
+    assert policy.dirty_cleanup is True

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 class GitError(RuntimeError):
@@ -15,6 +16,43 @@ class GitStatusEntry:
     xy: str
     path: str
     orig_path: str | None = None
+
+
+DEFAULT_DIRTY_IGNORE_GLOBS: tuple[str, ...] = (
+    ".pytest_cache/**",
+    "__pycache__/**",
+    "*.pyc",
+    "*.pyo",
+    ".mypy_cache/**",
+    ".ruff_cache/**",
+    ".hypothesis/**",
+    ".tox/**",
+    ".nox/**",
+    ".coverage",
+    ".coverage.*",
+    "htmlcov/**",
+    ".ipynb_checkpoints/**",
+    "*.egg-info/**",
+    ".eggs/**",
+    "dist/**",
+    "build/**",
+    ".DS_Store",
+)
+
+
+AUTO_DIRTY_IGNORE_GLOBS: tuple[str, ...] = (
+    "tests/data/**",
+    "tests/output/**",
+    "tests/outputs/**",
+    "tests/tmp/**",
+    "tests/.cache/**",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DirtyIgnoreResolution:
+    resolved: tuple[str, ...]
+    detected: tuple[str, ...]
 
 
 def _run_git(
@@ -46,6 +84,31 @@ def _run_git(
     return completed
 
 
+def _glob_prefix(pattern: str) -> str:
+    for idx, ch in enumerate(pattern):
+        if ch in "*?[":
+            return pattern[:idx].rstrip("/")
+    return pattern.rstrip("/")
+
+
+def _has_tracked_under(*, repo_root: Path, prefix: str) -> bool:
+    if not prefix:
+        return False
+    completed = _run_git(["ls-files", "-z", "--", prefix], cwd=repo_root, check=True)
+    return bool(completed.stdout)
+
+
+def _dedupe_preserve_order(items: Sequence[str]) -> tuple[str, ...]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item in seen:
+            continue
+        out.append(item)
+        seen.add(item)
+    return tuple(out)
+
+
 def git_remotes(*, repo_root: Path) -> list[str]:
     completed = _run_git(["remote"], cwd=repo_root, check=True)
     return [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
@@ -63,7 +126,7 @@ def git_head_is_detached(*, repo_root: Path) -> bool:
 
 
 def git_status_porcelain(*, repo_root: Path) -> tuple[GitStatusEntry, ...]:
-    completed = _run_git(["status", "--porcelain", "-z"], cwd=repo_root, check=True)
+    completed = _run_git(["status", "--porcelain", "-z", "-uall"], cwd=repo_root, check=True)
     data = completed.stdout or ""
     if not data:
         return ()
@@ -96,8 +159,116 @@ def git_status_porcelain(*, repo_root: Path) -> tuple[GitStatusEntry, ...]:
     return tuple(out)
 
 
-def git_is_dirty(*, repo_root: Path) -> bool:
-    return bool(git_status_porcelain(repo_root=repo_root))
+def _normalize_ignore_globs(ignore_globs: Sequence[str]) -> tuple[str, ...]:
+    out: list[str] = []
+    for item in ignore_globs:
+        if not item:
+            continue
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        if cleaned.endswith("/") and not cleaned.endswith("/**"):
+            cleaned = cleaned.rstrip("/") + "/**"
+        out.append(cleaned)
+    return tuple(out)
+
+
+def _matches_ignore_glob(path: str, ignore_globs: Sequence[str]) -> bool:
+    if not ignore_globs:
+        return False
+    rel = PurePosixPath(path)
+    for pattern in ignore_globs:
+        if rel.match(pattern):
+            return True
+        if pattern.endswith("/**"):
+            base = pattern[:-3]
+            if base and rel.match(base):
+                return True
+    return False
+
+
+def detect_dirty_ignore_globs(
+    *,
+    repo_root: Path,
+    candidates: Sequence[str] = AUTO_DIRTY_IGNORE_GLOBS,
+) -> tuple[str, ...]:
+    entries = git_status_porcelain(repo_root=repo_root)
+    untracked = [e.path for e in entries if e.xy == "??" and e.path]
+    if not untracked:
+        return ()
+    detected: list[str] = []
+    for pattern in _normalize_ignore_globs(candidates):
+        if not any(_matches_ignore_glob(path, (pattern,)) for path in untracked):
+            continue
+        prefix = _glob_prefix(pattern)
+        if prefix and _has_tracked_under(repo_root=repo_root, prefix=prefix):
+            continue
+        detected.append(pattern)
+    return _dedupe_preserve_order(detected)
+
+
+def resolve_dirty_ignore_globs(
+    *,
+    repo_root: Path,
+    configured: Sequence[str],
+) -> DirtyIgnoreResolution:
+    configured = _normalize_ignore_globs(configured)
+    detected = detect_dirty_ignore_globs(repo_root=repo_root)
+    resolved = _dedupe_preserve_order(
+        [*configured, *DEFAULT_DIRTY_IGNORE_GLOBS, *detected]
+    )
+    return DirtyIgnoreResolution(resolved=resolved, detected=detected)
+
+
+def git_status_filtered(
+    *,
+    repo_root: Path,
+    ignore_globs: Sequence[str] = (),
+) -> tuple[GitStatusEntry, ...]:
+    entries = git_status_porcelain(repo_root=repo_root)
+    ignore_globs = _normalize_ignore_globs(ignore_globs)
+    if not ignore_globs:
+        return entries
+    return tuple(
+        e for e in entries
+        if not (e.xy == "??" and e.path and _matches_ignore_glob(e.path, ignore_globs))
+    )
+
+
+def git_is_dirty(*, repo_root: Path, ignore_globs: Sequence[str] = ()) -> bool:
+    return bool(git_status_filtered(repo_root=repo_root, ignore_globs=ignore_globs))
+
+
+def git_remove_ignored_untracked(
+    *,
+    repo_root: Path,
+    ignore_globs: Sequence[str],
+) -> list[str]:
+    ignore_globs = _normalize_ignore_globs(ignore_globs)
+    if not ignore_globs:
+        return []
+    removed: list[str] = []
+    entries = git_status_porcelain(repo_root=repo_root)
+    for entry in entries:
+        if entry.xy != "??" or not entry.path:
+            continue
+        if not _matches_ignore_glob(entry.path, ignore_globs):
+            continue
+        rel = Path(entry.path)
+        if rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts:
+            continue
+        target = repo_root / rel
+        if not target.exists():
+            continue
+        try:
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        except OSError as e:
+            raise GitError(f"Failed to remove ignored path {entry.path!r}: {e}") from e
+        removed.append(entry.path)
+    return removed
 
 
 def git_current_branch(*, repo_root: Path) -> str:

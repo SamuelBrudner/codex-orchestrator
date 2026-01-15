@@ -36,9 +36,11 @@ from codex_orchestrator.git_subprocess import (
     git_fetch,
     git_head_is_detached,
     git_is_dirty,
+    git_remove_ignored_untracked,
     git_rev_parse,
+    resolve_dirty_ignore_globs,
     git_stage_all,
-    git_status_porcelain,
+    git_status_filtered,
     validate_paths_within_policy,
 )
 from codex_orchestrator.paths import OrchestratorPaths
@@ -286,7 +288,7 @@ def _infer_next_action(
     if skipped:
         return {
             "missing_tools": "Install required tools (git, bd, codex) and re-run.",
-            "git_dirty": "Clean/stash the repo working tree and re-run.",
+            "git_dirty": "Clean/stash the repo working tree (or set dirty_ignore_globs) and re-run.",
             "git_detached": "Checkout a branch (not detached HEAD) and re-run.",
             "git_fetch_failed": "Resolve git fetch failure (remotes/network) and re-run.",
             "git_branch_failed": "Resolve git branch setup failure and re-run.",
@@ -424,8 +426,12 @@ def _tests_missing_given_when_then(*, repo_root: Path, changed_paths: Sequence[s
     return missing
 
 
-def _diff_stats(*, repo_root: Path) -> tuple[int, int, tuple[str, ...]]:
-    status = git_status_porcelain(repo_root=repo_root)
+def _diff_stats(
+    *,
+    repo_root: Path,
+    dirty_ignore_globs: Sequence[str],
+) -> tuple[int, int, tuple[str, ...]]:
+    status = git_status_filtered(repo_root=repo_root, ignore_globs=dirty_ignore_globs)
     changed_paths = tuple(sorted({e.path for e in status if e.path}))
 
     tracked_numstat = git_diff_numstat(repo_root=repo_root, staged=False)
@@ -439,9 +445,15 @@ def _diff_stats(*, repo_root: Path) -> tuple[int, int, tuple[str, ...]]:
     return (len(changed_paths), lines_added, changed_paths)
 
 
-def _ensure_run_branch(*, repo_root: Path, run_id: str, base_branch: str) -> str:
+def _ensure_run_branch(
+    *,
+    repo_root: Path,
+    run_id: str,
+    base_branch: str,
+    dirty_ignore_globs: Sequence[str],
+) -> str:
     try:
-        if git_is_dirty(repo_root=repo_root):
+        if git_is_dirty(repo_root=repo_root, ignore_globs=dirty_ignore_globs):
             raise RepoExecutionError("Repo is dirty; refusing to run unattended work.")
         if git_head_is_detached(repo_root=repo_root):
             raise RepoExecutionError(
@@ -695,11 +707,42 @@ def execute_repo_tick(
         with RunLock(lock_path):
             _require_tools(["git", "bd", "codex"])
 
+            dirty_resolution = resolve_dirty_ignore_globs(
+                repo_root=repo_policy.path,
+                configured=repo_policy.dirty_ignore_globs,
+            )
+            dirty_ignore_globs = dirty_resolution.resolved
+            if dirty_ignore_globs:
+                emit("repo_dirty_ignore", globs=list(dirty_ignore_globs))
+            if dirty_resolution.detected:
+                emit("repo_dirty_ignore_detected", globs=list(dirty_resolution.detected))
+
+            if repo_policy.dirty_cleanup and dirty_ignore_globs:
+                try:
+                    removed_paths = git_remove_ignored_untracked(
+                        repo_root=repo_policy.path,
+                        ignore_globs=dirty_ignore_globs,
+                    )
+                except GitError as e:
+                    _append_log(
+                        exec_log_path,
+                        f"{_now().isoformat()} dirty_cleanup_failed error={e}",
+                    )
+                    emit("repo_dirty_cleanup_failed", error=str(e))
+                else:
+                    if removed_paths:
+                        _append_log(
+                            exec_log_path,
+                            f"{_now().isoformat()} dirty_cleanup_removed count={len(removed_paths)}",
+                        )
+                        emit("repo_dirty_cleanup", removed=removed_paths)
+
             try:
                 run_branch = _ensure_run_branch(
                     repo_root=repo_policy.path,
                     run_id=run_id,
                     base_branch=repo_policy.base_branch,
+                    dirty_ignore_globs=dirty_ignore_globs,
                 )
             except RepoExecutionError as e:
                 msg = str(e)
@@ -808,7 +851,10 @@ def execute_repo_tick(
                 _append_log(log_path, f"{_now().isoformat()} planning_failed error={e}")
                 repo_failures.append(f"Planning failed: {e}")
                 emit("planning_failed", error=str(e))
-                was_clean_before_report = not git_is_dirty(repo_root=repo_policy.path)
+                was_clean_before_report = not git_is_dirty(
+                    repo_root=repo_policy.path,
+                    ignore_globs=dirty_ignore_globs,
+                )
                 maybe_write_repo_report(branch=run_branch)
                 if was_clean_before_report and run_report_path is not None:
                     try:
@@ -996,7 +1042,10 @@ def execute_repo_tick(
                         argv=list(codex_argv),
                     )
                     stop_reason = "error"
-                    was_clean_before_report = not git_is_dirty(repo_root=repo_policy.path)
+                    was_clean_before_report = not git_is_dirty(
+                        repo_root=repo_policy.path,
+                        ignore_globs=dirty_ignore_globs,
+                    )
                     maybe_write_repo_report(branch=run_branch)
                     if was_clean_before_report and run_report_path is not None:
                         try:
@@ -1047,7 +1096,10 @@ def execute_repo_tick(
                         "Policy violation: codex created commits; orchestrator must own commits."
                     )
 
-                files_changed, lines_added, changed_paths = _diff_stats(repo_root=repo_policy.path)
+                files_changed, lines_added, changed_paths = _diff_stats(
+                    repo_root=repo_policy.path,
+                    dirty_ignore_globs=dirty_ignore_globs,
+                )
                 emit(
                     "diff_stats",
                     bead_id=item.bead_id,
@@ -1084,7 +1136,10 @@ def execute_repo_tick(
                     )
                     repo_failures.append(f"{item.bead_id}: no changes detected after codex.")
                     stop_reason = "blocked"
-                    was_clean_before_report = not git_is_dirty(repo_root=repo_policy.path)
+                    was_clean_before_report = not git_is_dirty(
+                        repo_root=repo_policy.path,
+                        ignore_globs=dirty_ignore_globs,
+                    )
                     maybe_write_repo_report(branch=run_branch)
                     if was_clean_before_report and run_report_path is not None:
                         try:
@@ -1533,7 +1588,10 @@ def execute_repo_tick(
                 f"attempted={beads_attempted} closed={beads_closed} stop_reason={stop_reason}",
             )
 
-            if beads_closed == 0 and not git_is_dirty(repo_root=repo_policy.path):
+            if beads_closed == 0 and not git_is_dirty(
+                repo_root=repo_policy.path,
+                ignore_globs=dirty_ignore_globs,
+            ):
                 if not run_report_committed:
                     maybe_write_repo_report(branch=run_branch)
                     if run_report_path is not None:

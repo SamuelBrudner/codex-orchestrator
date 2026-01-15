@@ -11,7 +11,14 @@ from typing import Any
 from codex_orchestrator.ai_policy import AiSettings, codex_cli_args_for_settings
 from codex_orchestrator.audit_trail import write_json_atomic
 from codex_orchestrator.codex_subprocess import codex_exec_full_auto
-from codex_orchestrator.git_subprocess import GitError, git_is_dirty, git_rev_parse, git_status_porcelain
+from codex_orchestrator.git_subprocess import (
+    GitError,
+    git_is_dirty,
+    git_rev_parse,
+    git_status_filtered,
+    resolve_dirty_ignore_globs,
+)
+from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import PlannerError, read_run_deck
 
@@ -356,17 +363,31 @@ def _review_only_prompt(*, run_id: str, repo_id: str) -> str:
     ).rstrip("\n")
 
 
+def _load_dirty_ignore_globs(
+    repo_config_path: Path | None,
+) -> dict[str, tuple[str, ...]]:
+    if repo_config_path is None or not repo_config_path.exists():
+        return {}
+    try:
+        inventory = load_repo_inventory(repo_config_path)
+    except RepoConfigError as e:
+        raise RunClosureReviewError(f"Failed to load repo config for review: {e}") from e
+    return {policy.repo_id: policy.dirty_ignore_globs for policy in inventory.list_repos()}
+
+
 def run_review_only_codex_pass(
     paths: OrchestratorPaths,
     *,
     run_id: str,
     ai_settings: AiSettings,
     timeout_seconds: float = 900.0,
+    repo_config_path: Path | None = None,
 ) -> tuple[CodexReviewLog, ...]:
     run_dir = paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     logs: list[CodexReviewLog] = []
+    dirty_ignore_by_repo = _load_dirty_ignore_globs(repo_config_path)
     for summary in _load_repo_summaries(paths, run_id=run_id):
         repo_id = str(summary.get("repo_id") or "")
         if not repo_id:
@@ -382,8 +403,13 @@ def run_review_only_codex_pass(
             head_before = git_rev_parse(repo_root=repo_root)
         except GitError as e:
             raise RunClosureReviewError(f"Final Codex review failed for {repo_id}: {e}") from e
-        if git_is_dirty(repo_root=repo_root):
-            status = git_status_porcelain(repo_root=repo_root)
+        configured_globs = dirty_ignore_by_repo.get(repo_id, ())
+        ignore_globs = resolve_dirty_ignore_globs(
+            repo_root=repo_root,
+            configured=configured_globs,
+        ).resolved
+        if git_is_dirty(repo_root=repo_root, ignore_globs=ignore_globs):
+            status = git_status_filtered(repo_root=repo_root, ignore_globs=ignore_globs)
             changed = ", ".join(sorted({e.path for e in status if e.path})) or "<unknown>"
             raise RunClosureReviewError(
                 f"Final Codex review refused for {repo_id}: repo is dirty before review ({changed})."
@@ -431,8 +457,8 @@ def run_review_only_codex_pass(
                 f"(head {head_before[:12]} -> {head_after[:12]})."
             )
 
-        if git_is_dirty(repo_root=repo_root):
-            status = git_status_porcelain(repo_root=repo_root)
+        if git_is_dirty(repo_root=repo_root, ignore_globs=ignore_globs):
+            status = git_status_filtered(repo_root=repo_root, ignore_globs=ignore_globs)
             changed = ", ".join(sorted({e.path for e in status if e.path})) or "<unknown>"
             raise RunClosureReviewError(
                 f"Policy violation: final Codex review produced a diff for {repo_id} ({changed})."

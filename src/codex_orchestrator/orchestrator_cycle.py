@@ -94,6 +94,7 @@ def run_orchestrator_cycle(
                                 paths,
                                 run_id=ensure_result.run_id,
                                 ai_settings=ai_settings,
+                                repo_config_path=repo_config_path,
                             )
                     except RunClosureReviewError as e:
                         raise OrchestratorCycleError(str(e)) from e
@@ -151,6 +152,7 @@ def run_orchestrator_cycle(
                             paths,
                             run_id=tick_result.run_id,
                             ai_settings=ai_settings,
+                            repo_config_path=repo_config_path,
                         )
                 except RunClosureReviewError as e:
                     raise OrchestratorCycleError(str(e)) from e

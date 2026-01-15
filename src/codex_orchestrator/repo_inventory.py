@@ -116,6 +116,15 @@ def _as_str(
     return value
 
 
+def _as_bool(value: Any, *, field: str, errors: list[str]) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        errors.append(f"{field}: expected bool, got {type(value).__name__}")
+        return None
+    return value
+
+
 def _as_str_list(value: Any, *, field: str, errors: list[str]) -> list[str] | None:
     if value is None:
         return None
@@ -132,6 +141,30 @@ def _as_str_list(value: Any, *, field: str, errors: list[str]) -> list[str] | No
             continue
         out.append(item)
     return out
+
+
+def _as_rel_globs(
+    value: Any,
+    *,
+    field: str,
+    default: tuple[str, ...],
+    errors: list[str],
+) -> tuple[str, ...]:
+    items = _as_str_list(value, field=field, errors=errors)
+    if items is None:
+        return default
+
+    out: list[str] = []
+    for idx, item in enumerate(items):
+        p = Path(item)
+        if p.is_absolute():
+            errors.append(f"{field}[{idx}]: must be a relative path glob, got {item!r}")
+            continue
+        if ".." in p.parts:
+            errors.append(f"{field}[{idx}]: must not contain '..', got {item!r}")
+            continue
+        out.append(item)
+    return tuple(out)
 
 
 def _as_rel_paths(
@@ -184,6 +217,8 @@ class RepoPolicy:
     deny_roots: tuple[Path, ...]
     validation_commands: tuple[str, ...]
     notebook_output_policy: NotebookOutputPolicy
+    dirty_ignore_globs: tuple[str, ...] = ()
+    dirty_cleanup: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +309,8 @@ def load_repo_inventory(config_path: Path) -> RepoInventory:
             "deny_roots",
             "validation_commands",
             "notebook_output_policy",
+            "dirty_ignore_globs",
+            "dirty_cleanup",
         }
         unknown_fields = set(repo_data) - known_fields
         if unknown_fields:
@@ -314,6 +351,19 @@ def load_repo_inventory(config_path: Path) -> RepoInventory:
             default=(),
             errors=errors,
         )
+        dirty_ignore_globs = _as_rel_globs(
+            repo_data.get("dirty_ignore_globs"),
+            field=f"repos.{repo_id}.dirty_ignore_globs",
+            default=(),
+            errors=errors,
+        )
+        dirty_cleanup = _as_bool(
+            repo_data.get("dirty_cleanup"),
+            field=f"repos.{repo_id}.dirty_cleanup",
+            errors=errors,
+        )
+        if dirty_cleanup is None:
+            dirty_cleanup = False
 
         validation_commands_raw = _as_str_list(
             repo_data.get("validation_commands"),
@@ -361,6 +411,8 @@ def load_repo_inventory(config_path: Path) -> RepoInventory:
             deny_roots=deny_roots,
             validation_commands=validation_commands,
             notebook_output_policy=notebook_output_policy,
+            dirty_ignore_globs=dirty_ignore_globs,
+            dirty_cleanup=dirty_cleanup,
         )
         _validate_orchestrator_outputs_policy(
             repo_id=repo_id,

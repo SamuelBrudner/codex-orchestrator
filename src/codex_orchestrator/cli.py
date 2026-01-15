@@ -72,7 +72,12 @@ def _cmd_tick(args: argparse.Namespace) -> int:
             try:
                 write_final_review(paths, run_id=result.run_id, ai_settings=ai_settings)
                 if bool(args.final_review_codex):
-                    run_review_only_codex_pass(paths, run_id=result.run_id, ai_settings=ai_settings)
+                    run_review_only_codex_pass(
+                        paths,
+                        run_id=result.run_id,
+                        ai_settings=ai_settings,
+                        repo_config_path=Path("config/repos.toml"),
+                    )
             except RunClosureReviewError as e:
                 raise SystemExit(f"codex-orchestrator: {e}") from e
         if result.run_id is None:

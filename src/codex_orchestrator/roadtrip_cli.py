@@ -257,7 +257,12 @@ def main(argv: list[str] | None = None) -> int:
                 if ended_run_id is not None:
                     write_final_review(paths, run_id=ended_run_id, ai_settings=settings)
                     if bool(args.final_review_codex):
-                        run_review_only_codex_pass(paths, run_id=ended_run_id, ai_settings=settings)
+                        run_review_only_codex_pass(
+                            paths,
+                            run_id=ended_run_id,
+                            ai_settings=settings,
+                            repo_config_path=Path("config/repos.toml"),
+                        )
         except Exception as e:
             raise SystemExit(f"codex-roadtrip: failed to end run: {e}") from e
     return 0
