@@ -120,7 +120,17 @@ def _parse_issue(data: Any, *, context: str) -> BdIssue:
     )
 
 
+def _parse_single_issue(data: Any, *, context: str) -> BdIssue:
+    if isinstance(data, list):
+        if len(data) != 1:
+            raise BdCliError(f"{context}: expected single-item list, got {len(data)} items")
+        data = data[0]
+    return _parse_issue(data, context=context)
+
+
 def bd_init(*, repo_root: Path) -> None:
+    if (repo_root / ".beads" / "beads.db").exists():
+        return
     _run_bd(["init", "--quiet"], cwd=repo_root)
 
 
@@ -248,12 +258,7 @@ def bd_list_open_titles(*, repo_root: Path) -> set[str]:
 
 def bd_show(*, repo_root: Path, issue_id: str) -> BdIssue:
     data = _parse_json_output(_run_bd(["show", issue_id, "--json"], cwd=repo_root))
-    # bd show returns a list with a single item
-    if isinstance(data, list):
-        if len(data) != 1:
-            raise BdCliError(f"bd show {issue_id} --json: expected single-item list, got {len(data)} items")
-        data = data[0]
-    return _parse_issue(data, context=f"bd show {issue_id} --json")
+    return _parse_single_issue(data, context=f"bd show {issue_id} --json")
 
 
 def bd_update(
@@ -270,14 +275,14 @@ def bd_update(
         args.extend(["--notes", notes])
     args.append("--json")
     data = _parse_json_output(_run_bd(args, cwd=repo_root))
-    return _parse_issue(data, context=f"bd update {issue_id} --json")
+    return _parse_single_issue(data, context=f"bd update {issue_id} --json")
 
 
 def bd_close(*, repo_root: Path, issue_id: str, reason: str) -> BdIssue:
     data = _parse_json_output(
         _run_bd(["close", issue_id, "--reason", reason, "--json"], cwd=repo_root)
     )
-    return _parse_issue(data, context=f"bd close {issue_id} --json")
+    return _parse_single_issue(data, context=f"bd close {issue_id} --json")
 
 
 def bd_create(
@@ -308,7 +313,7 @@ def bd_create(
         args.extend(["--deps", ",".join(deps)])
     args.append("--json")
     data = _parse_json_output(_run_bd(args, cwd=repo_root))
-    return _parse_issue(data, context="bd create --json")
+    return _parse_single_issue(data, context="bd create --json")
 
 
 def bd_dep_add(
