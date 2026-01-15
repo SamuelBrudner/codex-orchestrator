@@ -19,6 +19,8 @@ class GitStatusEntry:
 
 
 DEFAULT_DIRTY_IGNORE_GLOBS: tuple[str, ...] = (
+    ".beads/**",
+    "bd.sock",
     ".pytest_cache/**",
     "__pycache__/**",
     "*.pyc",
@@ -230,8 +232,9 @@ def git_status_filtered(
     if not ignore_globs:
         return entries
     return tuple(
-        e for e in entries
-        if not (e.xy == "??" and e.path and _matches_ignore_glob(e.path, ignore_globs))
+        e
+        for e in entries
+        if not (e.path and _matches_ignore_glob(e.path, ignore_globs))
     )
 
 
@@ -313,11 +316,17 @@ def git_commit(*, repo_root: Path, subject: str, body: str) -> str:
     return git_rev_parse(repo_root=repo_root)
 
 
-def git_diff_numstat(*, repo_root: Path, staged: bool) -> tuple[tuple[str, int, int], ...]:
+def git_diff_numstat(
+    *,
+    repo_root: Path,
+    staged: bool,
+    ignore_globs: Sequence[str] = (),
+) -> tuple[tuple[str, int, int], ...]:
     args = ["diff", "--numstat"]
     if staged:
         args.append("--staged")
     completed = _run_git(args, cwd=repo_root, check=True)
+    ignore_globs = _normalize_ignore_globs(ignore_globs)
     out: list[tuple[str, int, int]] = []
     for line in (completed.stdout or "").splitlines():
         if not line.strip():
@@ -326,6 +335,8 @@ def git_diff_numstat(*, repo_root: Path, staged: bool) -> tuple[tuple[str, int, 
         if len(parts) != 3:
             continue
         added_raw, deleted_raw, path = parts
+        if ignore_globs and _matches_ignore_glob(path, ignore_globs):
+            continue
         try:
             added = int(added_raw) if added_raw.isdigit() else 0
         except ValueError:

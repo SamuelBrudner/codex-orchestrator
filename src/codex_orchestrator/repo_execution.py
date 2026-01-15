@@ -434,7 +434,11 @@ def _diff_stats(
     status = git_status_filtered(repo_root=repo_root, ignore_globs=dirty_ignore_globs)
     changed_paths = tuple(sorted({e.path for e in status if e.path}))
 
-    tracked_numstat = git_diff_numstat(repo_root=repo_root, staged=False)
+    tracked_numstat = git_diff_numstat(
+        repo_root=repo_root,
+        staged=False,
+        ignore_globs=dirty_ignore_globs,
+    )
     added_by_path: dict[str, int] = {p: added for p, added, _ in tracked_numstat}
     lines_added = sum(added_by_path.values())
 

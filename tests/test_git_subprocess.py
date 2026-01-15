@@ -67,6 +67,20 @@ def test_git_status_filtered_keeps_tracked_changes(tmp_path: Path) -> None:
     assert any(entry.path == "tracked.txt" for entry in status)
 
 
+def test_git_status_filtered_ignores_tracked_globs(tmp_path: Path) -> None:
+    repo_root = _init_repo(tmp_path)
+    beads_dir = repo_root / ".beads"
+    beads_dir.mkdir()
+    issues = beads_dir / "issues.jsonl"
+    issues.write_text("[]\n", encoding="utf-8")
+    _git(repo_root, "add", ".beads/issues.jsonl")
+    _git(repo_root, "commit", "-m", "track beads")
+
+    issues.write_text("[{\"id\": \"bd-1\"}]\n", encoding="utf-8")
+    status = git_status_filtered(repo_root=repo_root, ignore_globs=(".beads/**",))
+    assert not any(entry.path == ".beads/issues.jsonl" for entry in status)
+
+
 def test_resolve_dirty_ignore_globs_includes_defaults(tmp_path: Path) -> None:
     repo_root = _init_repo(tmp_path)
     resolved = resolve_dirty_ignore_globs(repo_root=repo_root, configured=())
