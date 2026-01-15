@@ -212,3 +212,5 @@ __marimo__/
 # Local configuration (contains absolute paths and personal info)
 config/repos.toml
 config/orchestrator.toml
+config/bead_contracts/home_science.toml
+config/bead_contracts/lab_tracker.toml
