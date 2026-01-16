@@ -214,3 +214,5 @@ config/repos.toml
 config/orchestrator.toml
 config/bead_contracts/home_science.toml
 config/bead_contracts/lab_tracker.toml
+.beads/daemon-error
+.beads/last-touched
