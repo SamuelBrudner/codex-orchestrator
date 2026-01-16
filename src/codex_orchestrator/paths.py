@@ -80,6 +80,15 @@ class OrchestratorPaths:
     def repo_events_path(self, run_id: str, repo_id: str) -> Path:
         return self.run_dir(run_id) / f"{repo_id}.events.jsonl"
 
+    def repo_prompt_path(
+        self,
+        run_id: str,
+        repo_id: str,
+        bead_id: str,
+        attempt: int,
+    ) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.{bead_id}.prompt.{attempt}.txt"
+
     def repo_summary_path(self, run_id: str, repo_id: str) -> Path:
         return self.run_dir(run_id) / f"{repo_id}.summary.json"
 
