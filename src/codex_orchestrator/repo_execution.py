@@ -23,6 +23,7 @@ from codex_orchestrator.audit_trail import (
     format_repo_run_report_md,
     write_json_atomic,
     write_repo_run_report,
+    write_text_atomic,
 )
 from codex_orchestrator.codex_subprocess import CodexCliError, codex_exec_full_auto
 from codex_orchestrator.git_subprocess import (
@@ -208,11 +209,13 @@ def _format_codex_prompt(
     repo_policy: RepoPolicy,
     item: RunDeckItem,
     focus: str | None = None,
+    validation_context: str | None = None,
 ) -> str:
     contract = item.contract
     allowed_roots = ", ".join(p.as_posix() for p in contract.allowed_roots)
     deny_roots = ", ".join(p.as_posix() for p in contract.deny_roots) or "<none>"
     validation = "\n".join(f"- {c}" for c in contract.validation_commands) or "<none>"
+    env_label = contract.env.strip() if contract.env else "<none>"
 
     lines = [
         "You are working in a local git repository under an orchestrated run.",
@@ -238,6 +241,7 @@ def _format_codex_prompt(
         "",
         "Constraints:",
         f"- Time budget: {contract.time_budget_minutes} minutes",
+        f"- Conda env: {env_label}",
         f"- Allowed roots: {allowed_roots}",
         f"- Deny roots: {deny_roots}",
         "- Do not edit files outside allowed roots or under deny roots.",
@@ -245,11 +249,20 @@ def _format_codex_prompt(
         "",
         "Validation commands (must pass to close):",
         validation,
+    ])
+    if validation_context:
+        lines.extend([
+            "",
+            "Validation context:",
+            *validation_context.rstrip().splitlines(),
+        ])
+    lines.extend([
         "",
         "Task:",
         f"- Complete bead {item.bead_id} ({item.title}) conservatively.",
         "- Make the minimal safe changes needed.",
         "- Ensure validation commands pass.",
+        "- If a validation tool is missing, install it in the configured conda env.",
         "",
         "Style:",
         "- Prefer idiomatic, readable code; avoid deep nesting.",
@@ -260,6 +273,58 @@ def _format_codex_prompt(
     ])
 
     return "\n".join(lines)
+
+
+MIN_VALIDATION_RETRY_SECONDS = 60.0
+
+
+def _baseline_validation_context(item: RunDeckItem) -> str | None:
+    failures = [r for r in item.baseline_validation if r.exit_code != 0]
+    if not failures:
+        return None
+    lines = ["Baseline validation failures (before this bead):"]
+    for r in failures:
+        lines.append(f"- {r.command}: exit={r.exit_code}")
+    lines.append("Resolve these if possible (install missing tools or fix tests).")
+    return "\n".join(lines)
+
+
+def _format_validation_retry_context(
+    *,
+    attempt: int,
+    validation_results: Mapping[str, ValidationResult],
+    baseline_failures: Sequence[str],
+) -> str:
+    failed = {cmd: r for cmd, r in validation_results.items() if r.exit_code != 0}
+    lines = [f"Validation failures after attempt {attempt}:"]
+    for cmd in sorted(failed):
+        lines.append(f"- {cmd}: {_validation_status(failed[cmd].exit_code)}")
+    if baseline_failures:
+        still = sorted(cmd for cmd in baseline_failures if cmd in failed)
+        if still:
+            lines.append("Baseline failures still present:")
+            lines.extend(f"- {cmd}" for cmd in still)
+    lines.append("Fix the failures above and re-run validations.")
+    return "\n".join(lines)
+
+
+def _remaining_bead_time(
+    *,
+    tick: TickBudget,
+    now: datetime,
+    bead_deadline: datetime,
+) -> timedelta:
+    remaining_tick = tick.remaining(now=now)
+    remaining_bead = max(bead_deadline - now, timedelta(0))
+    return remaining_tick if remaining_tick <= remaining_bead else remaining_bead
+
+
+def _can_retry_validation(*, tick: TickBudget, now: datetime, bead_deadline: datetime) -> bool:
+    return _remaining_bead_time(
+        tick=tick,
+        now=now,
+        bead_deadline=bead_deadline,
+    ) >= timedelta(seconds=MIN_VALIDATION_RETRY_SECONDS)
 
 
 def _append_log(path: Path, message: str) -> None:
@@ -299,6 +364,8 @@ def _infer_next_action(
     last_failed = next((b for b in reversed(bead_audits) if b.get("outcome") == "failed"), None)
     if last_failed is not None:
         detail = str(last_failed.get("detail") or "").strip()
+        if "Baseline failing validations" in detail:
+            return "Fix baseline validation failures and re-run."
         if "Validation failed" in detail:
             return "Fix failing validation(s) and re-run."
         if "No behavioral test" in detail:
@@ -555,6 +622,7 @@ def execute_repo_tick(
     extracted_code_touched: set[str] = set()
     repo_failures: list[str] = []
     follow_ups: list[str] = []
+    prompt_records: list[dict[str, object]] = []
     run_report_path: Path | None = None
     run_report_committed: bool = False
     deck_path: Path | None = None
@@ -620,6 +688,7 @@ def execute_repo_tick(
             planning_audit=planning_audit,
             ai_settings=config.ai_settings.to_json_dict(),
             codex_command=codex_command,
+            prompts=prompt_records,
             beads=bead_audits,
             planning_skipped=planning_skipped,
             notebook_refactors=notebook_refactors,
@@ -973,437 +1042,468 @@ def execute_repo_tick(
                     )
 
                 head_before = git_rev_parse(repo_root=repo_policy.path)
-                codex_prompt = _format_codex_prompt(
-                    run_id=run_id,
-                    repo_policy=repo_policy,
-                    item=item,
-                    focus=config.focus,
-                )
-                timeout_seconds = max(
-                    60.0,
-                    min(
-                        (tick.ends_at - now).total_seconds(),
-                        (
-                            timedelta(minutes=item.contract.time_budget_minutes)
-                            + config.codex_timeout_padding
-                        ).total_seconds(),
-                    ),
-                )
-                _append_log(
-                    log_path,
-                    f"{_now().isoformat()} codex_start bead_id={item.bead_id} "
-                    f"timeout={timeout_seconds:.0f}s",
-                )
-                codex_argv = (
-                    "codex",
-                    "exec",
-                    "--full-auto",
-                    *codex_cli_args_for_settings(config.ai_settings),
-                )
                 emit("bead_start", bead_id=item.bead_id, title=item.title)
-                emit(
-                    "codex_start",
-                    bead_id=item.bead_id,
-                    timeout_seconds=timeout_seconds,
-                    argv=list(codex_argv),
+                baseline_failures = tuple(
+                    r.command for r in item.baseline_validation if r.exit_code != 0
                 )
-                try:
-                    codex_invocation = codex_exec_full_auto(
-                        prompt=codex_prompt,
-                        cwd=repo_policy.path,
-                        timeout_seconds=timeout_seconds,
-                        extra_args=codex_cli_args_for_settings(config.ai_settings),
-                        output_limit_chars=config.codex_output_limit_chars,
+                validation_context = _baseline_validation_context(item)
+                bead_started_at = _now()
+                bead_deadline = bead_started_at + (
+                    timedelta(minutes=item.contract.time_budget_minutes)
+                    + config.codex_timeout_padding
+                )
+                attempt = 0
+
+                while True:
+                    attempt += 1
+                    now = _now()
+                    remaining = _remaining_bead_time(
+                        tick=tick,
+                        now=now,
+                        bead_deadline=bead_deadline,
                     )
-                except CodexCliError as e:
-                    bd_update(
-                        repo_root=repo_policy.path,
-                        issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "")
-                        + f"[orchestrator] codex invocation failed: {e}",
+                    codex_prompt = _format_codex_prompt(
+                        run_id=run_id,
+                        repo_policy=repo_policy,
+                        item=item,
+                        focus=config.focus,
+                        validation_context=validation_context,
                     )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail=f"codex CLI failed: {e}",
-                        )
+                    prompt_path = paths.repo_prompt_path(
+                        run_id,
+                        repo_policy.repo_id,
+                        item.bead_id,
+                        attempt,
                     )
-                    bead_audits.append(
+                    prompt_rel = prompt_path.relative_to(paths.cache_dir).as_posix()
+                    write_text_atomic(prompt_path, codex_prompt)
+                    prompt_records.append(
                         {
                             "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": f"codex CLI failed: {e}",
+                            "attempt": attempt,
+                            "path": prompt_rel,
                         }
                     )
-                    repo_failures.append(f"codex failed for {item.bead_id}: {e}")
                     emit(
-                        "codex_failed",
+                        "codex_prompt",
                         bead_id=item.bead_id,
-                        error=str(e),
+                        attempt=attempt,
+                        path=prompt_rel,
+                    )
+                    timeout_seconds = max(
+                        60.0,
+                        min(
+                            remaining.total_seconds(),
+                            (
+                                timedelta(minutes=item.contract.time_budget_minutes)
+                                + config.codex_timeout_padding
+                            ).total_seconds(),
+                        ),
+                    )
+                    _append_log(
+                        log_path,
+                        f"{_now().isoformat()} codex_start bead_id={item.bead_id} "
+                        f"attempt={attempt} timeout={timeout_seconds:.0f}s",
+                    )
+                    codex_argv = (
+                        "codex",
+                        "exec",
+                        "--full-auto",
+                        *codex_cli_args_for_settings(config.ai_settings),
+                    )
+                    emit(
+                        "codex_start",
+                        bead_id=item.bead_id,
+                        attempt=attempt,
+                        timeout_seconds=timeout_seconds,
                         argv=list(codex_argv),
                     )
-                    stop_reason = "error"
-                    was_clean_before_report = not git_is_dirty(
-                        repo_root=repo_policy.path,
-                        ignore_globs=dirty_ignore_globs,
-                    )
-                    maybe_write_repo_report(branch=run_branch)
-                    if was_clean_before_report and run_report_path is not None:
-                        try:
-                            git_stage_all(repo_root=repo_policy.path)
-                            git_commit(
-                                repo_root=repo_policy.path,
-                                subject=f"run_report({run_id}): {repo_policy.repo_id}",
-                                body=f"RUN_ID: {run_id}\n\nRun report: docs/runs/{run_id}.md",
+                    try:
+                        codex_invocation = codex_exec_full_auto(
+                            prompt=codex_prompt,
+                            cwd=repo_policy.path,
+                            timeout_seconds=timeout_seconds,
+                            extra_args=codex_cli_args_for_settings(config.ai_settings),
+                            output_limit_chars=config.codex_output_limit_chars,
+                        )
+                    except CodexCliError as e:
+                        bd_update(
+                            repo_root=repo_policy.path,
+                            issue_id=item.bead_id,
+                            notes=(issue.notes + "\n" if issue.notes else "")
+                            + f"[orchestrator] codex invocation failed: {e}",
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome="failed",
+                                detail=f"codex CLI failed: {e}",
                             )
-                            run_report_committed = True
-                        except GitError as commit_err:
-                            repo_failures.append(f"Failed to commit run report: {commit_err}")
-                    break
+                        )
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": "failed",
+                                "detail": f"codex CLI failed: {e}",
+                            }
+                        )
+                        repo_failures.append(f"codex failed for {item.bead_id}: {e}")
+                        emit(
+                            "codex_failed",
+                            bead_id=item.bead_id,
+                            attempt=attempt,
+                            error=str(e),
+                            argv=list(codex_argv),
+                        )
+                        stop_reason = "error"
+                        was_clean_before_report = not git_is_dirty(
+                            repo_root=repo_policy.path,
+                            ignore_globs=dirty_ignore_globs,
+                        )
+                        maybe_write_repo_report(branch=run_branch)
+                        if was_clean_before_report and run_report_path is not None:
+                            try:
+                                git_stage_all(repo_root=repo_policy.path)
+                                git_commit(
+                                    repo_root=repo_policy.path,
+                                    subject=f"run_report({run_id}): {repo_policy.repo_id}",
+                                    body=f"RUN_ID: {run_id}\n\nRun report: docs/runs/{run_id}.md",
+                                )
+                                run_report_committed = True
+                            except GitError as commit_err:
+                                repo_failures.append(f"Failed to commit run report: {commit_err}")
+                        break
 
-                _append_log(
-                    log_path,
-                    f"{_now().isoformat()} codex_end bead_id={item.bead_id} "
-                    f"exit={codex_invocation.exit_code}",
-                )
-                emit(
-                    "codex_end",
-                    bead_id=item.bead_id,
-                    exit_code=codex_invocation.exit_code,
-                    started_at=codex_invocation.started_at.isoformat(),
-                    finished_at=codex_invocation.finished_at.isoformat(),
-                    argv=list(codex_invocation.args),
-                )
-                _append_log(log_path, codex_invocation.stdout)
-                _append_log(
-                    stdout_log_path,
-                    f"{_now().isoformat()} codex_stdout bead_id={item.bead_id} "
-                    f"exit={codex_invocation.exit_code}",
-                )
-                _append_log(stdout_log_path, codex_invocation.stdout)
-                if codex_invocation.stderr.strip():
-                    _append_log(log_path, "[stderr]")
-                    _append_log(log_path, codex_invocation.stderr)
                     _append_log(
-                        stderr_log_path,
-                        f"{_now().isoformat()} codex_stderr bead_id={item.bead_id} "
-                        f"exit={codex_invocation.exit_code}",
+                        log_path,
+                        f"{_now().isoformat()} codex_end bead_id={item.bead_id} "
+                        f"attempt={attempt} exit={codex_invocation.exit_code}",
                     )
-                    _append_log(stderr_log_path, codex_invocation.stderr)
-
-                head_after = git_rev_parse(repo_root=repo_policy.path)
-                if head_after != head_before:
-                    raise RepoExecutionError(
-                        "Policy violation: codex created commits; orchestrator must own commits."
+                    emit(
+                        "codex_end",
+                        bead_id=item.bead_id,
+                        attempt=attempt,
+                        exit_code=codex_invocation.exit_code,
+                        started_at=codex_invocation.started_at.isoformat(),
+                        finished_at=codex_invocation.finished_at.isoformat(),
+                        argv=list(codex_invocation.args),
                     )
-
-                files_changed, lines_added, changed_paths = _diff_stats(
-                    repo_root=repo_policy.path,
-                    dirty_ignore_globs=dirty_ignore_globs,
-                )
-                emit(
-                    "diff_stats",
-                    bead_id=item.bead_id,
-                    files_changed=files_changed,
-                    lines_added=lines_added,
-                    changed_paths=list(changed_paths),
-                )
-                if files_changed == 0:
-                    bd_update(
-                        repo_root=repo_policy.path,
-                        issue_id=item.bead_id,
-                        notes=(
-                            (issue.notes + "\n" if issue.notes else "")
-                            + "[orchestrator] No git changes detected after codex; "
-                            "cannot commit/close."
-                        ),
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail="No changes detected.",
-                        )
-                    )
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": "No changes detected.",
-                            "changed_paths": list(changed_paths),
-                        }
-                    )
-                    repo_failures.append(f"{item.bead_id}: no changes detected after codex.")
-                    stop_reason = "blocked"
-                    was_clean_before_report = not git_is_dirty(
-                        repo_root=repo_policy.path,
-                        ignore_globs=dirty_ignore_globs,
-                    )
-                    maybe_write_repo_report(branch=run_branch)
-                    if was_clean_before_report and run_report_path is not None:
-                        try:
-                            git_stage_all(repo_root=repo_policy.path)
-                            git_commit(
-                                repo_root=repo_policy.path,
-                                subject=f"run_report({run_id}): {repo_policy.repo_id}",
-                                body=f"RUN_ID: {run_id}\n\nRun report: docs/runs/{run_id}.md",
-                            )
-                            run_report_committed = True
-                        except GitError as commit_err:
-                            repo_failures.append(f"Failed to commit run report: {commit_err}")
-                    break
-
-                try:
-                    validate_paths_within_policy(
-                        paths=changed_paths,
-                        allowed_roots=item.contract.allowed_roots,
-                        deny_roots=item.contract.deny_roots,
-                    )
-                except GitError as e:
-                    bd_update(
-                        repo_root=repo_policy.path,
-                        issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "") + f"[orchestrator] {e}",
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail=str(e),
-                        )
-                    )
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": str(e),
-                            "changed_paths": list(changed_paths),
-                        }
-                    )
-                    repo_failures.append(f"{item.bead_id}: {e}")
-                    stop_reason = "blocked"
-                    maybe_write_repo_report(branch=run_branch)
-                    break
-
-                if tick_files_changed + files_changed > config.diff_caps.max_files_changed:
-                    bd_update(
-                        repo_root=repo_policy.path,
-                        issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "")
-                        + "[orchestrator] Diff cap exceeded: "
-                        + f"tick_files_changed={tick_files_changed + files_changed} "
-                        + f"max={config.diff_caps.max_files_changed}",
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail="Diff cap exceeded (files changed).",
-                        )
-                    )
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": "Diff cap exceeded (files changed).",
-                            "changed_paths": list(changed_paths),
-                        }
-                    )
-                    repo_failures.append(f"{item.bead_id}: diff cap exceeded (files changed).")
-                    stop_reason = "blocked"
-                    maybe_write_repo_report(branch=run_branch)
-                    break
-
-                if tick_lines_added + lines_added > config.diff_caps.max_lines_added:
-                    bd_update(
-                        repo_root=repo_policy.path,
-                        issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "")
-                        + "[orchestrator] Diff cap exceeded: "
-                        + f"tick_lines_added={tick_lines_added + lines_added} "
-                        + f"max={config.diff_caps.max_lines_added}",
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail="Diff cap exceeded (lines added).",
-                        )
-                    )
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": "Diff cap exceeded (lines added).",
-                            "changed_paths": list(changed_paths),
-                        }
-                    )
-                    repo_failures.append(f"{item.bead_id}: diff cap exceeded (lines added).")
-                    stop_reason = "blocked"
-                    maybe_write_repo_report(branch=run_branch)
-                    break
-
-                tick_files_changed += files_changed
-                tick_lines_added += lines_added
-
-                try:
-                    _require_validation_allowlist(item.contract.validation_commands)
-                except RepoExecutionError as e:
-                    bd_update(
-                        repo_root=repo_policy.path,
-                        issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "")
-                        + f"[orchestrator] {e}",
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail=str(e),
-                        )
-                    )
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": str(e),
-                            "changed_paths": list(changed_paths),
-                        }
-                    )
-                    repo_failures.append(f"{item.bead_id}: {e}")
-                    stop_reason = "blocked"
-                    maybe_write_repo_report(branch=run_branch)
-                    break
-
-                validation_results = run_validation_commands(
-                    item.contract.validation_commands,
-                    cwd=repo_policy.path,
-                    env=item.contract.env,
-                    timeout_seconds=config.validation_timeout_seconds,
-                )
-                for cmd, r in validation_results.items():
-                    validation_status_by_command[cmd] = _validation_status(r.exit_code)
+                    _append_log(log_path, codex_invocation.stdout)
                     _append_log(
                         stdout_log_path,
-                        f"{_now().isoformat()} validation_stdout bead_id={item.bead_id} "
-                        f"cmd={cmd} exit={r.exit_code}",
+                        f"{_now().isoformat()} codex_stdout bead_id={item.bead_id} "
+                        f"attempt={attempt} exit={codex_invocation.exit_code}",
                     )
-                    if r.stdout.strip():
-                        _append_log(stdout_log_path, r.stdout)
-                    _append_log(
-                        stderr_log_path,
-                        f"{_now().isoformat()} validation_stderr bead_id={item.bead_id} "
-                        f"cmd={cmd} exit={r.exit_code}",
-                    )
-                    if r.stderr.strip():
-                        _append_log(stderr_log_path, r.stderr)
-                emit(
-                    "validation_end",
-                    bead_id=item.bead_id,
-                    results={cmd: r.exit_code for cmd, r in validation_results.items()},
-                )
-                baseline = _baseline_by_command(item)
-                baseline_failures = sorted(
-                    cmd
-                    for cmd, r in baseline.items()
-                    if cmd in validation_results
-                    and r.exit_code != 0
-                )
-                still_failing = sorted(
-                    cmd
-                    for cmd in baseline_failures
-                    if validation_results.get(cmd) is not None
-                    and validation_results[cmd].exit_code != 0
-                )
-                if still_failing:
-                    bd_update(
-                        repo_root=repo_policy.path,
-                        issue_id=item.bead_id,
-                        notes=(
-                            (issue.notes + "\n" if issue.notes else "")
-                            + "[orchestrator] Pre-existing failing validations remain failing; "
-                            "cannot close.\n"
-                            + _format_validation_summary(validation_results)
-                        ),
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail="Baseline failing validations still failing.",
+                    _append_log(stdout_log_path, codex_invocation.stdout)
+                    if codex_invocation.stderr.strip():
+                        _append_log(log_path, "[stderr]")
+                        _append_log(log_path, codex_invocation.stderr)
+                        _append_log(
+                            stderr_log_path,
+                            f"{_now().isoformat()} codex_stderr bead_id={item.bead_id} "
+                            f"attempt={attempt} exit={codex_invocation.exit_code}",
                         )
+                        _append_log(stderr_log_path, codex_invocation.stderr)
+
+                    head_after = git_rev_parse(repo_root=repo_policy.path)
+                    if head_after != head_before:
+                        raise RepoExecutionError(
+                            "Policy violation: codex created commits; orchestrator must own commits."
+                        )
+
+                    files_changed, lines_added, changed_paths = _diff_stats(
+                        repo_root=repo_policy.path,
+                        dirty_ignore_globs=dirty_ignore_globs,
                     )
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": "Baseline failing validations still failing.",
-                            "changed_paths": list(changed_paths),
-                            "validation": {
-                                cmd: _validation_status(r.exit_code)
-                                for cmd, r in validation_results.items()
-                            },
-                        }
+                    emit(
+                        "diff_stats",
+                        bead_id=item.bead_id,
+                        attempt=attempt,
+                        files_changed=files_changed,
+                        lines_added=lines_added,
+                        changed_paths=list(changed_paths),
                     )
-                    repo_failures.append(
-                        f"{item.bead_id}: baseline failing validations still failing."
+                    if files_changed == 0:
+                        bd_update(
+                            repo_root=repo_policy.path,
+                            issue_id=item.bead_id,
+                            notes=(
+                                (issue.notes + "\n" if issue.notes else "")
+                                + "[orchestrator] No git changes detected after codex; "
+                                "cannot commit/close."
+                            ),
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome="failed",
+                                detail="No changes detected.",
+                            )
+                        )
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": "failed",
+                                "detail": "No changes detected.",
+                                "changed_paths": list(changed_paths),
+                            }
+                        )
+                        repo_failures.append(f"{item.bead_id}: no changes detected after codex.")
+                        stop_reason = "blocked"
+                        was_clean_before_report = not git_is_dirty(
+                            repo_root=repo_policy.path,
+                            ignore_globs=dirty_ignore_globs,
+                        )
+                        maybe_write_repo_report(branch=run_branch)
+                        if was_clean_before_report and run_report_path is not None:
+                            try:
+                                git_stage_all(repo_root=repo_policy.path)
+                                git_commit(
+                                    repo_root=repo_policy.path,
+                                    subject=f"run_report({run_id}): {repo_policy.repo_id}",
+                                    body=f"RUN_ID: {run_id}\n\nRun report: docs/runs/{run_id}.md",
+                                )
+                                run_report_committed = True
+                            except GitError as commit_err:
+                                repo_failures.append(f"Failed to commit run report: {commit_err}")
+                        break
+
+                    try:
+                        validate_paths_within_policy(
+                            paths=changed_paths,
+                            allowed_roots=item.contract.allowed_roots,
+                            deny_roots=item.contract.deny_roots,
+                        )
+                    except GitError as e:
+                        bd_update(
+                            repo_root=repo_policy.path,
+                            issue_id=item.bead_id,
+                            notes=(issue.notes + "\n" if issue.notes else "") + f"[orchestrator] {e}",
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome="failed",
+                                detail=str(e),
+                            )
+                        )
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": "failed",
+                                "detail": str(e),
+                                "changed_paths": list(changed_paths),
+                            }
+                        )
+                        repo_failures.append(f"{item.bead_id}: {e}")
+                        stop_reason = "blocked"
+                        maybe_write_repo_report(branch=run_branch)
+                        break
+
+                    if tick_files_changed + files_changed > config.diff_caps.max_files_changed:
+                        bd_update(
+                            repo_root=repo_policy.path,
+                            issue_id=item.bead_id,
+                            notes=(issue.notes + "\n" if issue.notes else "")
+                            + "[orchestrator] Diff cap exceeded: "
+                            + f"tick_files_changed={tick_files_changed + files_changed} "
+                            + f"max={config.diff_caps.max_files_changed}",
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome="failed",
+                                detail="Diff cap exceeded (files changed).",
+                            )
+                        )
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": "failed",
+                                "detail": "Diff cap exceeded (files changed).",
+                                "changed_paths": list(changed_paths),
+                            }
+                        )
+                        repo_failures.append(f"{item.bead_id}: diff cap exceeded (files changed).")
+                        stop_reason = "blocked"
+                        maybe_write_repo_report(branch=run_branch)
+                        break
+
+                    if tick_lines_added + lines_added > config.diff_caps.max_lines_added:
+                        bd_update(
+                            repo_root=repo_policy.path,
+                            issue_id=item.bead_id,
+                            notes=(issue.notes + "\n" if issue.notes else "")
+                            + "[orchestrator] Diff cap exceeded: "
+                            + f"tick_lines_added={tick_lines_added + lines_added} "
+                            + f"max={config.diff_caps.max_lines_added}",
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome="failed",
+                                detail="Diff cap exceeded (lines added).",
+                            )
+                        )
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": "failed",
+                                "detail": "Diff cap exceeded (lines added).",
+                                "changed_paths": list(changed_paths),
+                            }
+                        )
+                        repo_failures.append(f"{item.bead_id}: diff cap exceeded (lines added).")
+                        stop_reason = "blocked"
+                        maybe_write_repo_report(branch=run_branch)
+                        break
+
+                    try:
+                        _require_validation_allowlist(item.contract.validation_commands)
+                    except RepoExecutionError as e:
+                        bd_update(
+                            repo_root=repo_policy.path,
+                            issue_id=item.bead_id,
+                            notes=(issue.notes + "\n" if issue.notes else "")
+                            + f"[orchestrator] {e}",
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome="failed",
+                                detail=str(e),
+                            )
+                        )
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": "failed",
+                                "detail": str(e),
+                                "changed_paths": list(changed_paths),
+                            }
+                        )
+                        repo_failures.append(f"{item.bead_id}: {e}")
+                        stop_reason = "blocked"
+                        maybe_write_repo_report(branch=run_branch)
+                        break
+
+                    validation_results = run_validation_commands(
+                        item.contract.validation_commands,
+                        cwd=repo_policy.path,
+                        env=item.contract.env,
+                        timeout_seconds=config.validation_timeout_seconds,
                     )
-                    stop_reason = "blocked"
-                    maybe_write_repo_report(branch=run_branch)
+                    for cmd, r in validation_results.items():
+                        validation_status_by_command[cmd] = _validation_status(r.exit_code)
+                        _append_log(
+                            stdout_log_path,
+                            f"{_now().isoformat()} validation_stdout bead_id={item.bead_id} "
+                            f"attempt={attempt} cmd={cmd} exit={r.exit_code}",
+                        )
+                        if r.stdout.strip():
+                            _append_log(stdout_log_path, r.stdout)
+                        _append_log(
+                            stderr_log_path,
+                            f"{_now().isoformat()} validation_stderr bead_id={item.bead_id} "
+                            f"attempt={attempt} cmd={cmd} exit={r.exit_code}",
+                        )
+                        if r.stderr.strip():
+                            _append_log(stderr_log_path, r.stderr)
+                    emit(
+                        "validation_end",
+                        bead_id=item.bead_id,
+                        attempt=attempt,
+                        results={cmd: r.exit_code for cmd, r in validation_results.items()},
+                    )
+                    still_failing = sorted(
+                        cmd
+                        for cmd in baseline_failures
+                        if validation_results.get(cmd) is not None
+                        and validation_results[cmd].exit_code != 0
+                    )
+                    failed_commands = sorted(
+                        cmd for cmd, r in validation_results.items() if r.exit_code != 0
+                    )
+                    if failed_commands:
+                        if _can_retry_validation(
+                            tick=tick,
+                            now=_now(),
+                            bead_deadline=bead_deadline,
+                        ):
+                            validation_context = _format_validation_retry_context(
+                                attempt=attempt,
+                                validation_results=validation_results,
+                                baseline_failures=baseline_failures,
+                            )
+                            continue
+
+                        attempt_note = f" after {attempt} attempt(s)" if attempt > 1 else ""
+                        if still_failing:
+                            detail = "Baseline failing validations still failing (time budget exhausted)."
+                            note_prefix = (
+                                "[orchestrator] Pre-existing failing validations remain failing; "
+                                "time budget exhausted; cannot close.\n"
+                            )
+                            repo_failures.append(
+                                f"{item.bead_id}: baseline failing validations still failing{attempt_note}."
+                            )
+                        else:
+                            detail = "Validation failed (time budget exhausted)."
+                            note_prefix = "[orchestrator] Validation failed; time budget exhausted.\n"
+                            repo_failures.append(
+                                f"{item.bead_id}: validation failed ({', '.join(failed_commands)})"
+                                f"{attempt_note}."
+                            )
+
+                        bd_update(
+                            repo_root=repo_policy.path,
+                            issue_id=item.bead_id,
+                            notes=(issue.notes + "\n" if issue.notes else "")
+                            + note_prefix
+                            + _format_validation_summary(validation_results),
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome="failed",
+                                detail=detail,
+                            )
+                        )
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": "failed",
+                                "detail": detail,
+                                "changed_paths": list(changed_paths),
+                                "validation": {
+                                    cmd: _validation_status(r.exit_code)
+                                    for cmd, r in validation_results.items()
+                                },
+                            }
+                        )
+                        stop_reason = "blocked"
+                        maybe_write_repo_report(branch=run_branch)
+                        break
+
+                    tick_files_changed += files_changed
+                    tick_lines_added += lines_added
                     break
 
-                failed_commands = sorted(
-                    cmd for cmd, r in validation_results.items() if r.exit_code != 0
-                )
-                if failed_commands:
-                    bd_update(
-                        repo_root=repo_policy.path,
-                        issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "")
-                        + "[orchestrator] Validation failed; stopping.\n"
-                        + _format_validation_summary(validation_results),
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail="Validation failed.",
-                        )
-                    )
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": "Validation failed.",
-                            "changed_paths": list(changed_paths),
-                            "validation": {
-                                cmd: _validation_status(r.exit_code)
-                                for cmd, r in validation_results.items()
-                            },
-                        }
-                    )
-                    repo_failures.append(
-                        f"{item.bead_id}: validation failed ({', '.join(failed_commands)})."
-                    )
-                    stop_reason = "blocked"
-                    maybe_write_repo_report(branch=run_branch)
+                if stop_reason is not None:
                     break
 
                 if not any(

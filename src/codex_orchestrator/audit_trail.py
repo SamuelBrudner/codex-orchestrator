@@ -110,6 +110,7 @@ def format_repo_run_report_md(
     planning_audit: Mapping[str, Any] | None = None,
     ai_settings: Mapping[str, str] | None,
     codex_command: str | None,
+    prompts: list[Mapping[str, Any]] | None = None,
     beads: list[Mapping[str, Any]],
     planning_skipped: list[Mapping[str, Any]],
     notebook_refactors: Mapping[str, list[str]],
@@ -181,6 +182,18 @@ def format_repo_run_report_md(
         lines.append(f"- Reasoning effort: `{reasoning_effort}`")
     if codex_command:
         lines.append(f"- Codex invocation: `{codex_command}`")
+    lines.append("")
+
+    lines.append("## Codex Prompts")
+    if not prompts:
+        lines.append("- None")
+    else:
+        for p in prompts:
+            bead_id = p.get("bead_id", "<unknown>")
+            attempt = p.get("attempt")
+            path = p.get("path", "<unknown>")
+            attempt_label = f"attempt {attempt}" if attempt is not None else "attempt ?"
+            lines.append(f"- `{bead_id}` {attempt_label}: `{path}`")
     lines.append("")
 
     lines.append("## Beads Issues Worked")
