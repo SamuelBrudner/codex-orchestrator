@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -26,6 +27,7 @@ from codex_orchestrator.audit_trail import (
     write_text_atomic,
 )
 from codex_orchestrator.codex_subprocess import CodexCliError, codex_exec_full_auto
+from codex_orchestrator.env_bootstrap import refresh_repo_env
 from codex_orchestrator.git_subprocess import (
     GitError,
     git_branch_exists,
@@ -262,6 +264,8 @@ def _format_codex_prompt(
         f"- Complete bead {item.bead_id} ({item.title}) conservatively.",
         "- Make the minimal safe changes needed.",
         "- Ensure validation commands pass.",
+        "- If validation fails due to missing modules, add deps in pyproject.toml",
+        "  and/or environment*.yml; the orchestrator will refresh the env on changes.",
         "- If a validation tool is missing, install it in the configured conda env.",
         "",
         "Style:",
@@ -276,6 +280,36 @@ def _format_codex_prompt(
 
 
 MIN_VALIDATION_RETRY_SECONDS = 60.0
+
+
+_MISSING_MODULE_PATTERNS = (
+    re.compile(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]"),
+    re.compile(r"ImportError: No module named ['\"]([^'\"]+)['\"]"),
+    re.compile(r"ImportError: cannot import name ['\"][^'\"]+['\"] from ['\"]([^'\"]+)['\"]"),
+    re.compile(r"No module named ['\"]?([A-Za-z0-9_\\.]+)['\"]?"),
+)
+
+
+def _extract_missing_modules(text: str) -> list[str]:
+    missing: set[str] = set()
+    for line in text.splitlines():
+        for pattern in _MISSING_MODULE_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                missing.add(match.group(1))
+    return sorted(missing)
+
+
+def _collect_missing_modules(validation_results: Mapping[str, ValidationResult]) -> list[str]:
+    missing: set[str] = set()
+    for result in validation_results.values():
+        if result.exit_code == 0:
+            continue
+        combined = "\n".join([result.stdout, result.stderr]).strip()
+        if not combined:
+            continue
+        missing.update(_extract_missing_modules(combined))
+    return sorted(missing)
 
 
 def _baseline_validation_context(item: RunDeckItem) -> str | None:
@@ -299,6 +333,10 @@ def _format_validation_retry_context(
     lines = [f"Validation failures after attempt {attempt}:"]
     for cmd in sorted(failed):
         lines.append(f"- {cmd}: {_validation_status(failed[cmd].exit_code)}")
+    missing = _collect_missing_modules(validation_results)
+    if missing:
+        lines.append("Missing modules detected:")
+        lines.append("- " + ", ".join(missing))
     if baseline_failures:
         still = sorted(cmd for cmd in baseline_failures if cmd in failed)
         if still:
@@ -516,6 +554,83 @@ def _diff_stats(
     return (len(changed_paths), lines_added, changed_paths)
 
 
+_PIP_EDITABLE_NAMES = {
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "Pipfile",
+    "Pipfile.lock",
+}
+_ENV_FILE_GLOBS = ("environment*.yml", "environment*.yaml")
+_REQUIREMENTS_GLOBS = (
+    "requirements*.txt",
+    "requirements*.in",
+    "constraints*.txt",
+    "constraints*.in",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DependencyChange:
+    env_files: tuple[str, ...]
+    requirements_files: tuple[str, ...]
+    pip_editable: bool
+    paths: tuple[str, ...]
+
+
+def _normalize_path(raw: str) -> str:
+    return raw.replace("\\", "/")
+
+
+def _matches_any_glob(path: str, patterns: Sequence[str]) -> bool:
+    name = Path(path).name
+    for pattern in patterns:
+        if fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(name, pattern):
+            return True
+    return False
+
+
+def _classify_dependency_changes(changed_paths: Sequence[str]) -> DependencyChange:
+    env_files: list[str] = []
+    requirements_files: list[str] = []
+    paths: list[str] = []
+    pip_editable = False
+    for raw in changed_paths:
+        path = _normalize_path(raw)
+        name = Path(path).name
+        if name in _PIP_EDITABLE_NAMES:
+            pip_editable = True
+            paths.append(path)
+            continue
+        if _matches_any_glob(path, _ENV_FILE_GLOBS):
+            env_files.append(path)
+            paths.append(path)
+            continue
+        if _matches_any_glob(path, _REQUIREMENTS_GLOBS):
+            requirements_files.append(path)
+            paths.append(path)
+            continue
+    return DependencyChange(
+        env_files=tuple(sorted(set(env_files))),
+        requirements_files=tuple(sorted(set(requirements_files))),
+        pip_editable=pip_editable,
+        paths=tuple(sorted(set(paths))),
+    )
+
+
+def _dependency_signature(repo_root: Path, paths: Sequence[str]) -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = []
+    for raw in sorted(set(paths)):
+        path = _normalize_path(raw)
+        target = repo_root / path
+        if not target.exists():
+            signature.append((path, -1, -1))
+            continue
+        stat = target.stat()
+        signature.append((path, int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(signature)
+
+
 def _ensure_run_branch(
     *,
     repo_root: Path,
@@ -627,6 +742,7 @@ def execute_repo_tick(
     run_report_committed: bool = False
     deck_path: Path | None = None
     reused_existing_deck: bool | None = None
+    last_dependency_signature: tuple[tuple[str, int, int], ...] | None = None
 
     planning_audit_json_path = paths.repo_planning_audit_json_path(run_id, repo_policy.repo_id)
     planning_audit_md_path = paths.repo_planning_audit_md_path(run_id, repo_policy.repo_id)
@@ -1367,6 +1483,74 @@ def execute_repo_tick(
                         stop_reason = "blocked"
                         maybe_write_repo_report(branch=run_branch)
                         break
+
+                    dependency_change = _classify_dependency_changes(changed_paths)
+                    if dependency_change.paths and item.contract.env:
+                        dep_signature = _dependency_signature(
+                            repo_root=repo_policy.path,
+                            paths=dependency_change.paths,
+                        )
+                        if dep_signature != last_dependency_signature:
+                            emit(
+                                "env_refresh_start",
+                                env=item.contract.env,
+                                env_files=list(dependency_change.env_files),
+                                requirements_files=list(dependency_change.requirements_files),
+                                pip_editable=dependency_change.pip_editable,
+                            )
+                            refresh_result = refresh_repo_env(
+                                env_name=item.contract.env,
+                                repo_root=repo_policy.path,
+                                allow_env_creation=item.contract.allow_env_creation,
+                                env_files=[repo_policy.path / p for p in dependency_change.env_files],
+                                requirements_files=[
+                                    repo_policy.path / p for p in dependency_change.requirements_files
+                                ],
+                                pip_editable=dependency_change.pip_editable,
+                            )
+                            emit(
+                                "env_refresh_end",
+                                env=item.contract.env,
+                                env_files=list(dependency_change.env_files),
+                                requirements_files=list(dependency_change.requirements_files),
+                                pip_editable=dependency_change.pip_editable,
+                                conda_update_attempted=refresh_result.conda_update_attempted,
+                                conda_update_succeeded=refresh_result.conda_update_succeeded,
+                                pip_install_attempted=refresh_result.pip_install_attempted,
+                                pip_install_succeeded=refresh_result.pip_install_succeeded,
+                                error=refresh_result.error,
+                            )
+                            if refresh_result.error:
+                                bd_update(
+                                    repo_root=repo_policy.path,
+                                    issue_id=item.bead_id,
+                                    notes=(issue.notes + "\n" if issue.notes else "")
+                                    + f"[orchestrator] Env refresh failed: {refresh_result.error}",
+                                )
+                                bead_results.append(
+                                    BeadResult(
+                                        bead_id=item.bead_id,
+                                        title=item.title,
+                                        outcome="failed",
+                                        detail=f"Env refresh failed: {refresh_result.error}",
+                                    )
+                                )
+                                bead_audits.append(
+                                    {
+                                        "bead_id": item.bead_id,
+                                        "title": item.title,
+                                        "outcome": "failed",
+                                        "detail": f"Env refresh failed: {refresh_result.error}",
+                                        "changed_paths": list(changed_paths),
+                                    }
+                                )
+                                repo_failures.append(
+                                    f"{item.bead_id}: env refresh failed: {refresh_result.error}"
+                                )
+                                stop_reason = "blocked"
+                                maybe_write_repo_report(branch=run_branch)
+                                break
+                            last_dependency_signature = dep_signature
 
                     try:
                         _require_validation_allowlist(item.contract.validation_commands)

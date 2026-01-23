@@ -141,6 +141,20 @@ def _write_fake_codex(bin_dir: Path) -> None:
                 "            text += '\\n'",
                 "        text += '# touched\\n'",
                 "        p.write_text(text, encoding='utf-8')",
+                "    if os.environ.get('FAKE_CODEX_EDIT_PYPROJECT') == '1':",
+                "        p = Path('pyproject.toml')",
+                "        text = p.read_text(encoding='utf-8') if p.exists() else ''",
+                "        if not text.endswith('\\n'):",
+                "            text += '\\n'",
+                "        text += '# dep touch\\n'",
+                "        p.write_text(text, encoding='utf-8')",
+                "    if os.environ.get('FAKE_CODEX_EDIT_ENV') == '1':",
+                "        p = Path('environment.yml')",
+                "        text = p.read_text(encoding='utf-8') if p.exists() else ''",
+                "        if not text.endswith('\\n'):",
+                "            text += '\\n'",
+                "        text += '# dep touch\\n'",
+                "        p.write_text(text, encoding='utf-8')",
                 "    print('ok')",
                 "    return 0",
                 "",
@@ -180,6 +194,13 @@ def _write_fake_conda(bin_dir: Path) -> None:
                 "    if '--version' in argv[1:]:",
                 "        print('conda 0.0.0')",
                 "        return 0",
+                "    if len(argv) >= 3 and argv[1] == 'env' and argv[2] == 'list':",
+                "        print(json.dumps({'envs': ['/fake/envs/test']}))",
+                "        return 0",
+                "    if len(argv) >= 3 and argv[1] == 'env' and argv[2] == 'update':",
+                "        return 0",
+                "    if len(argv) >= 2 and argv[1] == 'create':",
+                "        return 0",
                 "    if len(argv) >= 2 and argv[1] == 'run':",
                 "        args = argv[2:]",
                 "        i = 0",
@@ -200,6 +221,8 @@ def _write_fake_conda(bin_dir: Path) -> None:
                 "        cmd = args[i:]",
                 "        if not cmd:",
                 "            return 2",
+                "        if cmd[:4] == ['python', '-m', 'pip', 'install']:",
+                "            return 0",
                 "        completed = subprocess.run(cmd, check=False)",
                 "        return int(completed.returncode)",
                 "    return 1",
@@ -412,6 +435,149 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     assert "-n" in run_calls[0]
     assert run_calls[0][run_calls[0].index("-n") + 1] == "test"
     assert "pytest" in run_calls[0]
+
+
+def test_execute_repo_tick_refreshes_env_on_dependency_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _git(repo_root, "init", "-b", "main")
+    _git(repo_root, "config", "user.name", "Test")
+    _git(repo_root, "config", "user.email", "test@example.com")
+    (repo_root / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+    (repo_root / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
+    (repo_root / "environment.yml").write_text(
+        "name: test\nchannels: []\ndependencies: []\n",
+        encoding="utf-8",
+    )
+    (repo_root / "test_dummy.py").write_text(
+        "def test_ok():\n    assert 1 + 1 == 2\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "init")
+
+    (repo_root / ".fake_beads.json").write_text(
+        json.dumps(
+            {
+                "bd-1": {
+                    "id": "bd-1",
+                    "title": "Test bead",
+                    "status": "open",
+                    "notes": "",
+                    "dependencies": [],
+                    "dependents": [],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", ".fake_beads.json")
+    _git(repo_root, "commit", "-m", "beads init")
+
+    cache_dir = tmp_path / "cache"
+    paths = OrchestratorPaths(cache_dir=cache_dir)
+    run_id = "20250102-000000-deadbeef"
+
+    contract = ResolvedExecutionContract(
+        time_budget_minutes=10,
+        validation_commands=("pytest -q",),
+        env="test",
+        allow_env_creation=False,
+        requires_notebook_execution=False,
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        notebook_roots=(Path("."),),
+        notebook_output_policy="strip",
+    )
+    baseline = ValidationResult(
+        command="pytest -q",
+        exit_code=0,
+        started_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        stdout="",
+        stderr="",
+    )
+    deck = RunDeck(
+        schema_version=2,
+        run_id=run_id,
+        repo_id="test_repo",
+        created_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        items=(
+            RunDeckItem(
+                bead_id="bd-1",
+                title="Test bead",
+                contract=contract,
+                baseline_validation=(baseline,),
+            ),
+        ),
+    )
+    write_run_deck(paths, deck=deck)
+
+    policy = RepoPolicy(
+        repo_id="test_repo",
+        path=repo_root,
+        base_branch="main",
+        env=None,
+        notebook_roots=(Path("."),),
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        validation_commands=("pytest -q",),
+        notebook_output_policy="strip",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_bd(bin_dir)
+    _write_fake_codex(bin_dir)
+    _write_fake_conda(bin_dir)
+
+    conda_log = tmp_path / "conda_argv.jsonl"
+    monkeypatch.setenv("FAKE_CONDA_LOG", conda_log.as_posix())
+    monkeypatch.setenv("FAKE_CODEX_EDIT_PYPROJECT", "1")
+    monkeypatch.setenv("FAKE_CODEX_EDIT_ENV", "1")
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=45))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=45),
+            min_minutes_to_start_new_bead=15,
+            max_beads_per_tick=3,
+            diff_caps=DiffCaps(max_files_changed=10, max_lines_added=100),
+        ),
+    )
+    assert result.skipped is False
+
+    invocations = [
+        json.loads(line)
+        for line in conda_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    env_updates = [
+        argv
+        for argv in invocations
+        if len(argv) >= 4 and argv[1] == "env" and argv[2] == "update"
+    ]
+    assert env_updates, "expected conda env update for environment.yml"
+    assert any(
+        arg.endswith("environment.yml") for argv in env_updates for arg in argv
+    )
+
+    run_calls = [argv for argv in invocations if len(argv) >= 2 and argv[1] == "run"]
+    assert any(
+        "pip" in argv and "install" in argv and "-e" in argv for argv in run_calls
+    ), "expected editable pip install via conda run"
 
 
 @pytest.mark.parametrize(
