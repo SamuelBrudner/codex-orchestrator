@@ -129,7 +129,8 @@ def _write_fake_codex(bin_dir: Path) -> None:
                 "    # Minimal stub: capture prompt from stdin and create a file to commit.",
                 "    prompt = sys.stdin.read()",
                 "    Path('.fake_codex_prompt.txt').write_text(prompt, encoding='utf-8')",
-                "    Path('work.txt').write_text('hello\\n', encoding='utf-8')",
+                "    if os.environ.get('FAKE_CODEX_NO_CHANGES') != '1':",
+                "        Path('work.txt').write_text('hello\\n', encoding='utf-8')",
                 "    if os.environ.get('FAKE_CODEX_EDIT_TEST_FILE') == '1':",
                 "        p = Path('test_dummy.py')",
                 "        text = p.read_text(encoding='utf-8') if p.exists() else ''",
@@ -221,6 +222,8 @@ def _write_fake_conda(bin_dir: Path) -> None:
                 "        cmd = args[i:]",
                 "        if not cmd:",
                 "            return 2",
+                "        if os.environ.get('FAKE_CONDA_FAIL_PYTEST') == '1' and cmd[0] == 'pytest':",
+                "            return 1",
                 "        if cmd[:4] == ['python', '-m', 'pip', 'install']:",
                 "            return 0",
                 "        completed = subprocess.run(cmd, check=False)",
@@ -355,7 +358,7 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
 
     started_at = datetime.now().astimezone()
-    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=45))
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(seconds=30))
     result = execute_repo_tick(
         paths=paths,
         run_id=run_id,
@@ -363,8 +366,8 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
         overlay_path=tmp_path / "unused_overlay.toml",
         tick=tick,
         config=RepoExecutionConfig(
-            tick_budget=timedelta(minutes=45),
-            min_minutes_to_start_new_bead=15,
+            tick_budget=timedelta(seconds=30),
+            min_minutes_to_start_new_bead=0,
             max_beads_per_tick=3,
             diff_caps=DiffCaps(max_files_changed=10, max_lines_added=100),
         ),
@@ -424,6 +427,7 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     message = _git(repo_root, "log", "-1", "--pretty=%B")
     assert message.splitlines()[0] == "beads(bd-1): Test bead"
     assert f"RUN_ID: {run_id}" in message
+    assert _git(repo_root, "status", "--porcelain") == ""
 
     invocations = [
         json.loads(line)
@@ -543,7 +547,7 @@ def test_execute_repo_tick_refreshes_env_on_dependency_changes(
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
 
     started_at = datetime.now().astimezone()
-    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=45))
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(seconds=30))
     result = execute_repo_tick(
         paths=paths,
         run_id=run_id,
@@ -551,8 +555,8 @@ def test_execute_repo_tick_refreshes_env_on_dependency_changes(
         overlay_path=tmp_path / "unused_overlay.toml",
         tick=tick,
         config=RepoExecutionConfig(
-            tick_budget=timedelta(minutes=45),
-            min_minutes_to_start_new_bead=15,
+            tick_budget=timedelta(seconds=30),
+            min_minutes_to_start_new_bead=0,
             max_beads_per_tick=3,
             diff_caps=DiffCaps(max_files_changed=10, max_lines_added=100),
         ),
@@ -578,6 +582,129 @@ def test_execute_repo_tick_refreshes_env_on_dependency_changes(
     assert any(
         "pip" in argv and "install" in argv and "-e" in argv for argv in run_calls
     ), "expected editable pip install via conda run"
+
+
+def test_execute_repo_tick_commits_failure_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _git(repo_root, "init", "-b", "main")
+    _git(repo_root, "config", "user.name", "Test")
+    _git(repo_root, "config", "user.email", "test@example.com")
+    (repo_root / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+    (repo_root / "test_dummy.py").write_text(
+        "def test_ok():\n    assert 1 + 1 == 2\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "init")
+
+    (repo_root / ".fake_beads.json").write_text(
+        json.dumps(
+            {
+                "bd-1": {
+                    "id": "bd-1",
+                    "title": "Test bead",
+                    "status": "open",
+                    "notes": "",
+                    "dependencies": [],
+                    "dependents": [],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", ".fake_beads.json")
+    _git(repo_root, "commit", "-m", "beads init")
+
+    cache_dir = tmp_path / "cache"
+    paths = OrchestratorPaths(cache_dir=cache_dir)
+    run_id = "20250103-000000-deadbeef"
+
+    contract = ResolvedExecutionContract(
+        time_budget_minutes=10,
+        validation_commands=("pytest -q",),
+        env="test",
+        allow_env_creation=False,
+        requires_notebook_execution=False,
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        notebook_roots=(Path("."),),
+        notebook_output_policy="strip",
+    )
+    baseline = ValidationResult(
+        command="pytest -q",
+        exit_code=0,
+        started_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        stdout="",
+        stderr="",
+    )
+    deck = RunDeck(
+        schema_version=2,
+        run_id=run_id,
+        repo_id="test_repo",
+        created_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        items=(
+            RunDeckItem(
+                bead_id="bd-1",
+                title="Test bead",
+                contract=contract,
+                baseline_validation=(baseline,),
+            ),
+        ),
+    )
+    write_run_deck(paths, deck=deck)
+
+    policy = RepoPolicy(
+        repo_id="test_repo",
+        path=repo_root,
+        base_branch="main",
+        env=None,
+        notebook_roots=(Path("."),),
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        validation_commands=("pytest -q",),
+        notebook_output_policy="strip",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_bd(bin_dir)
+    _write_fake_codex(bin_dir)
+    _write_fake_conda(bin_dir)
+
+    conda_log = tmp_path / "conda_argv.jsonl"
+    monkeypatch.setenv("FAKE_CONDA_LOG", conda_log.as_posix())
+    monkeypatch.setenv("FAKE_CONDA_FAIL_PYTEST", "1")
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(seconds=30))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(seconds=30),
+            min_minutes_to_start_new_bead=0,
+            max_beads_per_tick=3,
+            diff_caps=DiffCaps(max_files_changed=10, max_lines_added=100),
+        ),
+    )
+    assert result.stop_reason in {"blocked", "error"}
+    assert result.beads_closed == 0
+    assert result.bead_results[0].outcome == "failed"
+    assert _git(repo_root, "status", "--porcelain") == ""
+
+    message = _git(repo_root, "log", "-1", "--pretty=%B")
+    assert message.splitlines()[0] == "beads(bd-1): Test bead (failed)"
 
 
 @pytest.mark.parametrize(

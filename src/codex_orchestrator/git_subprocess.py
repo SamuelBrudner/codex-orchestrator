@@ -316,6 +316,11 @@ def git_commit(*, repo_root: Path, subject: str, body: str) -> str:
     return git_rev_parse(repo_root=repo_root)
 
 
+def git_commit_amend_no_edit(*, repo_root: Path) -> str:
+    _run_git(["commit", "--amend", "--no-edit"], cwd=repo_root, check=True)
+    return git_rev_parse(repo_root=repo_root)
+
+
 def git_diff_numstat(
     *,
     repo_root: Path,

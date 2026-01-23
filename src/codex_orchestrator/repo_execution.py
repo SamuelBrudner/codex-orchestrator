@@ -34,6 +34,7 @@ from codex_orchestrator.git_subprocess import (
     git_checkout,
     git_checkout_new_branch,
     git_commit,
+    git_commit_amend_no_edit,
     git_current_branch,
     git_diff_numstat,
     git_fetch,
@@ -631,6 +632,30 @@ def _dependency_signature(repo_root: Path, paths: Sequence[str]) -> tuple[tuple[
     return tuple(signature)
 
 
+def _last_failed_bead(bead_audits: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    for audit in reversed(bead_audits):
+        if audit.get("outcome") == "failed":
+            return audit
+    return None
+
+
+def _commit_failure_snapshot(
+    *,
+    repo_root: Path,
+    run_id: str,
+    bead_audits: Sequence[Mapping[str, Any]],
+) -> str | None:
+    failed = _last_failed_bead(bead_audits)
+    if failed is None:
+        return None
+    bead_id = failed.get("bead_id", "<unknown>")
+    title = failed.get("title", "Failed bead")
+    subject = f"beads({bead_id}): {title} (failed)"
+    body = f"RUN_ID: {run_id}\n\nFailure snapshot; bead did not close."
+    git_stage_all(repo_root=repo_root)
+    return git_commit(repo_root=repo_root, subject=subject, body=body)
+
+
 def _ensure_run_branch(
     *,
     repo_root: Path,
@@ -743,6 +768,7 @@ def execute_repo_tick(
     deck_path: Path | None = None
     reused_existing_deck: bool | None = None
     last_dependency_signature: tuple[tuple[str, int, int], ...] | None = None
+    failure_snapshot_committed = False
 
     planning_audit_json_path = paths.repo_planning_audit_json_path(run_id, repo_policy.repo_id)
     planning_audit_md_path = paths.repo_planning_audit_md_path(run_id, repo_policy.repo_id)
@@ -1828,16 +1854,13 @@ def execute_repo_tick(
                     stop_reason = "blocked"
                     break
 
-                bead_audit["commit_hash"] = commit_hash
-
                 summary_note = issue.notes + ("\n" if issue.notes else "")
                 summary_note += (
-                    f"[orchestrator] Closed in RUN_ID={run_id} on {run_branch} "
-                    f"(commit {commit_hash[:12]}).\n"
+                    f"[orchestrator] Closed in RUN_ID={run_id} on {run_branch}.\n"
                     + _format_validation_summary(validation_results)
                 )
                 bd_update(repo_root=repo_policy.path, issue_id=item.bead_id, notes=summary_note)
-                close_reason = f"Completed in RUN_ID={run_id} (commit {commit_hash[:12]})"
+                close_reason = f"Completed in RUN_ID={run_id} on {run_branch}"
                 bd_close(repo_root=repo_policy.path, issue_id=item.bead_id, reason=close_reason)
 
                 for dependent_id in issue.dependents:
@@ -1845,10 +1868,29 @@ def execute_repo_tick(
                     dep_note = dep.notes + ("\n" if dep.notes else "")
                     dep_note += (
                         f"[orchestrator] Upstream {item.bead_id} closed in RUN_ID={run_id} "
-                        f"on {run_branch} (commit {commit_hash[:12]})."
+                        f"on {run_branch}."
                     )
                     bd_update(repo_root=repo_policy.path, issue_id=dependent_id, notes=dep_note)
 
+                try:
+                    git_stage_all(repo_root=repo_policy.path)
+                    commit_hash = git_commit_amend_no_edit(repo_root=repo_policy.path)
+                except GitError as e:
+                    repo_failures.append(f"{item.bead_id}: git commit amend failed: {e}")
+                    bead_audit["outcome"] = "failed"
+                    bead_audit["detail"] = f"git commit amend failed: {e}"
+                    bead_results.append(
+                        BeadResult(
+                            bead_id=item.bead_id,
+                            title=item.title,
+                            outcome="failed",
+                            detail=f"git commit amend failed: {e}",
+                        )
+                    )
+                    stop_reason = "error"
+                    break
+
+                bead_audit["commit_hash"] = commit_hash
                 bead_results.append(
                     BeadResult(
                         bead_id=item.bead_id,
@@ -1870,13 +1912,37 @@ def execute_repo_tick(
             if stop_reason is None:
                 stop_reason = "completed"
 
+            if stop_reason in {"blocked", "error"} and git_is_dirty(
+                repo_root=repo_policy.path,
+                ignore_globs=(),
+            ):
+                try:
+                    snapshot_hash = _commit_failure_snapshot(
+                        repo_root=repo_policy.path,
+                        run_id=run_id,
+                        bead_audits=bead_audits,
+                    )
+                except GitError as e:
+                    repo_failures.append(f"Failure snapshot commit failed: {e}")
+                else:
+                    if snapshot_hash:
+                        failure_snapshot_committed = True
+                        failed = _last_failed_bead(bead_audits)
+                        if failed is not None:
+                            failed["commit_hash"] = snapshot_hash
+                        emit(
+                            "bead_failure_snapshot",
+                            bead_id=(failed or {}).get("bead_id"),
+                            commit_hash=snapshot_hash,
+                        )
+
             _append_log(
                 log_path,
                 f"{_now().isoformat()} repo_end repo_id={repo_policy.repo_id} "
                 f"attempted={beads_attempted} closed={beads_closed} stop_reason={stop_reason}",
             )
 
-            if beads_closed == 0 and not git_is_dirty(
+            if beads_closed == 0 and not failure_snapshot_committed and not git_is_dirty(
                 repo_root=repo_policy.path,
                 ignore_globs=dirty_ignore_globs,
             ):
