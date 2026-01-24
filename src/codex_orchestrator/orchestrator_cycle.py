@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from codex_orchestrator.ai_policy import AiSettings
+from codex_orchestrator.beads_subprocess import BdCliError, bd_doctor, bd_sync
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.repo_execution import (
     DiffCaps,
@@ -15,7 +16,7 @@ from codex_orchestrator.repo_execution import (
     TickBudget,
     execute_repos_tick,
 )
-from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
+from codex_orchestrator.repo_inventory import RepoConfigError, RepoPolicy, load_repo_inventory
 from codex_orchestrator.run_closure_review import (
     RunClosureReviewError,
     run_review_only_codex_pass,
@@ -35,6 +36,50 @@ class OrchestratorCycleResult:
     ensure_result: TickResult
     tick_result: TickResult | None
     repo_results: tuple[RepoTickResult, ...]
+
+
+def _append_run_log(paths: OrchestratorPaths, *, run_id: str, message: str) -> None:
+    log_path = paths.run_log_path(run_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().astimezone().isoformat()
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(f"{ts} {message.rstrip()}\n")
+
+
+def _attempt_beads_maintenance(
+    *,
+    paths: OrchestratorPaths,
+    run_id: str,
+    repos: Sequence[RepoPolicy],
+) -> None:
+    for repo in repos:
+        try:
+            bd_doctor(repo_root=repo.path)
+            _append_run_log(
+                paths,
+                run_id=run_id,
+                message=f"beads_doctor repo_id={repo.repo_id} status=ok",
+            )
+        except BdCliError as e:
+            _append_run_log(
+                paths,
+                run_id=run_id,
+                message=f"beads_doctor repo_id={repo.repo_id} status=error error={e}",
+            )
+
+        try:
+            bd_sync(repo_root=repo.path)
+            _append_run_log(
+                paths,
+                run_id=run_id,
+                message=f"beads_sync repo_id={repo.repo_id} status=ok",
+            )
+        except BdCliError as e:
+            _append_run_log(
+                paths,
+                run_id=run_id,
+                message=f"beads_sync repo_id={repo.repo_id} status=error error={e}",
+            )
 
 
 def run_orchestrator_cycle(
@@ -134,6 +179,16 @@ def run_orchestrator_cycle(
                 config=config,
             )
             actionable_work_found = any(r.beads_attempted > 0 for r in repo_results)
+            if (
+                mode == "manual"
+                and not actionable_work_found
+                and ensure_result.run_id is not None
+            ):
+                _attempt_beads_maintenance(
+                    paths=paths,
+                    run_id=ensure_result.run_id,
+                    repos=repos,
+                )
 
             tick_result = tick_run(
                 paths=paths,

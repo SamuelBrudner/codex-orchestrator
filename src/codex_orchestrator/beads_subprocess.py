@@ -164,6 +164,24 @@ def bd_ready(*, repo_root: Path) -> list[ReadyBead]:
     return out
 
 
+def bd_doctor(*, repo_root: Path) -> dict[str, Any]:
+    data = _parse_json_output(_run_bd(["doctor", "--json"], cwd=repo_root))
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise BdCliError(f"bd doctor --json: expected an object, got {type(data).__name__}")
+    return data
+
+
+def bd_sync(*, repo_root: Path) -> dict[str, Any]:
+    data = _parse_json_output(_run_bd(["sync", "--json"], cwd=repo_root))
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise BdCliError(f"bd sync --json: expected an object, got {type(data).__name__}")
+    return data
+
+
 def bd_list(*, repo_root: Path) -> tuple[BdIssueSummary, ...]:
     data = _parse_json_output(_run_bd(["list", "--json"], cwd=repo_root))
     if data is None:
