@@ -56,6 +56,20 @@ def _stub_bootstrap_repo_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(planning_pass, "bootstrap_repo_env", _bootstrap_repo_env)
 
 
+@pytest.fixture(autouse=True)
+def _stub_commit_message_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    import codex_orchestrator.planning_pass as planning_pass
+
+    def _ensure_commit_message_guidance_issue(*, repo_root: Path) -> None:
+        return None
+
+    monkeypatch.setattr(
+        planning_pass,
+        "ensure_commit_message_guidance_issue",
+        _ensure_commit_message_guidance_issue,
+    )
+
+
 def test_planning_pass_reuses_existing_deck(tmp_path: Path, monkeypatch) -> None:
     overlay_path = tmp_path / "test_repo.toml"
     _write_overlay(

@@ -95,3 +95,11 @@ Then use `mcp__beads__*` functions instead of CLI commands.
 - ❌ Do NOT duplicate tracking systems
 
 For more details, see README.md and QUICKSTART.md.
+
+## Commit Messages
+
+Use the following format:
+`(feat): <description of the work that was done> (prescribed by bead <ID>)`
+
+Example:
+`(feat): add data cleaning step (prescribed by bead bd-123)`

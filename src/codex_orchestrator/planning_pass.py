@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from codex_orchestrator.agent_guidance import ensure_commit_message_guidance_issue
 from codex_orchestrator.audit_trail import write_json_atomic, write_text_atomic
 from codex_orchestrator.beads_subprocess import bd_init, bd_list_ids, bd_ready
 from codex_orchestrator.contract_overlays import load_contract_overlay
@@ -119,6 +120,7 @@ def ensure_repo_run_deck(
 
     logger.info("Planning run deck for repo_id=%s", repo_policy.repo_id)
     bd_init(repo_root=repo_policy.path)
+    ensure_commit_message_guidance_issue(repo_root=repo_policy.path)
     known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
     ready_beads = bd_ready(repo_root=repo_policy.path)
 
