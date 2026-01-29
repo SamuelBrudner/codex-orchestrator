@@ -95,7 +95,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-parallel",
         type=int,
         default=None,
-        help="Max repos to run in parallel (defaults to $MAX_PARALLEL or 1).",
+        help="Max repos to run in parallel (defaults to $MAX_PARALLEL or auto).",
     )
     p.add_argument(
         "--idle-ticks-to-end",
@@ -158,15 +158,18 @@ def main(argv: list[str] | None = None) -> int:
     cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else default_cache_dir()
     paths = OrchestratorPaths(cache_dir=cache_dir)
 
-    max_parallel: int
+    max_parallel: int | None
     if args.max_parallel is not None:
         max_parallel = int(args.max_parallel)
     else:
-        raw = os.environ.get("MAX_PARALLEL", "1")
-        try:
-            max_parallel = int(raw)
-        except ValueError as e:
-            raise SystemExit(f"codex-roadtrip: invalid MAX_PARALLEL={raw!r} (expected int)") from e
+        raw = os.environ.get("MAX_PARALLEL")
+        if raw is None or str(raw).strip() == "":
+            max_parallel = None
+        else:
+            try:
+                max_parallel = int(raw)
+            except ValueError as e:
+                raise SystemExit(f"codex-roadtrip: invalid MAX_PARALLEL={raw!r} (expected int)") from e
 
     cadence_minutes = float(args.cadence_minutes)
     if cadence_minutes <= 0:

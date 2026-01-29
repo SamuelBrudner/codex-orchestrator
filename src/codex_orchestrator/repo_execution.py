@@ -2207,27 +2207,30 @@ def execute_repos_tick(
 ) -> tuple[RepoTickResult, ...]:
     if max_parallel < 1:
         raise RepoExecutionError(f"max_parallel must be >= 1, got {max_parallel}")
-    if tick is None:
-        started_at = _now()
-        tick = TickBudget(started_at=started_at, ends_at=started_at + config.tick_budget)
+    tick_budget = config.tick_budget
+    if tick is not None:
+        tick_budget = tick.ends_at - tick.started_at
 
     repo_list = list(repos)
     results: list[RepoTickResult] = []
+
+    def _run_repo(policy: RepoPolicy) -> RepoTickResult:
+        overlay_path = overlays_dir / f"{policy.repo_id}.toml"
+        started_at = _now()
+        repo_tick = TickBudget(started_at=started_at, ends_at=started_at + tick_budget)
+        return execute_repo_tick(
+            paths=paths,
+            run_id=run_id,
+            repo_policy=policy,
+            overlay_path=overlay_path,
+            tick=repo_tick,
+            config=config,
+        )
+
     with ThreadPoolExecutor(max_workers=max_parallel) as pool:
         futures = []
         for policy in repo_list:
-            overlay_path = overlays_dir / f"{policy.repo_id}.toml"
-            futures.append(
-                pool.submit(
-                    execute_repo_tick,
-                    paths=paths,
-                    run_id=run_id,
-                    repo_policy=policy,
-                    overlay_path=overlay_path,
-                    tick=tick,
-                    config=config,
-                )
-            )
+            futures.append(pool.submit(_run_repo, policy))
         for fut in futures:
             results.append(fut.result())
 

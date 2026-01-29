@@ -91,7 +91,7 @@ def run_orchestrator_cycle(
     overlays_dir: Path,
     repo_ids: Sequence[str] | None = None,
     repo_groups: Sequence[str] | None = None,
-    max_parallel: int = 1,
+    max_parallel: int | None = None,
     tick_minutes: float = 45.0,
     idle_ticks_to_end: int = 3,
     manual_ttl_hours: float = 12.0,
@@ -104,8 +104,6 @@ def run_orchestrator_cycle(
     now: datetime | None = None,
     focus: str | None = None,
 ) -> OrchestratorCycleResult:
-    if max_parallel < 1:
-        raise OrchestratorCycleError(f"max_parallel must be >= 1, got {max_parallel}")
     if tick_minutes <= 0:
         raise OrchestratorCycleError(f"tick_minutes must be > 0, got {tick_minutes}")
     if manual_ttl_hours <= 0:
@@ -168,6 +166,11 @@ def run_orchestrator_cycle(
                 ai_settings=ai_settings,
                 focus=focus,
             )
+
+            if max_parallel is None or max_parallel <= 0:
+                max_parallel = max(1, len(repos))
+            if max_parallel < 1:
+                raise OrchestratorCycleError(f"max_parallel must be >= 1, got {max_parallel}")
 
             repo_results = execute_repos_tick(
                 paths=paths,
