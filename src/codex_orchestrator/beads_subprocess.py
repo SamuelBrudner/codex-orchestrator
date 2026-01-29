@@ -22,6 +22,9 @@ class BdIssue:
     notes: str
     dependencies: tuple[str, ...]
     dependents: tuple[str, ...]
+    priority: int | None = None
+    issue_type: str | None = None
+    owner: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +113,23 @@ def _parse_issue(data: Any, *, context: str) -> BdIssue:
     dependencies = _extract_ids("dependencies")
     dependents = _extract_ids("dependents")
 
+    priority_raw = data.get("priority")
+    priority: int | None
+    if isinstance(priority_raw, bool) or priority_raw is None:
+        priority = None
+    elif isinstance(priority_raw, int):
+        priority = priority_raw
+    else:
+        priority = None
+
+    issue_type = data.get("issue_type")
+    if issue_type is not None and not isinstance(issue_type, str):
+        issue_type = None
+
+    owner = data.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        owner = None
+
     return BdIssue(
         issue_id=issue_id,
         title=title,
@@ -117,6 +137,9 @@ def _parse_issue(data: Any, *, context: str) -> BdIssue:
         notes=notes,
         dependencies=dependencies,
         dependents=dependents,
+        priority=priority,
+        issue_type=issue_type,
+        owner=owner,
     )
 
 

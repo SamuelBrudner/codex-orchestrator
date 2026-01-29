@@ -85,6 +85,10 @@ BeadOutcome = Literal[
     "failed",
 ]
 
+_TIMEOUT_SUMMARY_MARKER = "[orchestrator] Timeout summary"
+_DECOMPOSE_MARKER = "[orchestrator] Decomposed into follow-up beads"
+_FOLLOWUP_MAX_CHANGED_PATHS = 8
+
 
 @dataclass(frozen=True, slots=True)
 class DiffCaps:
@@ -345,6 +349,168 @@ def _format_validation_retry_context(
             lines.extend(f"- {cmd}" for cmd in still)
     lines.append("Fix the failures above and re-run validations.")
     return "\n".join(lines)
+
+
+def _truncate_note(text: str, *, limit: int = 1800) -> str:
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return text[:limit] + f"\n...<truncated {omitted} chars>"
+
+
+def _format_validation_status_line(
+    validation_results: Mapping[str, ValidationResult],
+) -> str:
+    if not validation_results:
+        return "none"
+    parts = [
+        f"{cmd}={_validation_status(r.exit_code)}"
+        for cmd, r in sorted(validation_results.items())
+    ]
+    return ", ".join(parts)
+
+
+def _format_timeout_summary(
+    *,
+    run_id: str,
+    bead_id: str,
+    title: str,
+    attempt: int,
+    failed_commands: Sequence[str],
+    baseline_failures: Sequence[str],
+    validation_results: Mapping[str, ValidationResult],
+    changed_paths: Sequence[str],
+) -> str:
+    tried = [
+        f"codex_attempts={attempt}",
+        f"validations={_format_validation_status_line(validation_results)}",
+    ]
+    problems: list[str] = ["time budget exhausted"]
+    if failed_commands:
+        problems.append(f"failed={', '.join(sorted(failed_commands))}")
+    if baseline_failures:
+        problems.append(f"baseline_failures={', '.join(sorted(baseline_failures))}")
+
+    learned: list[str] = []
+    missing_modules = _collect_missing_modules(validation_results)
+    if missing_modules:
+        learned.append(f"missing_modules={', '.join(missing_modules)}")
+    if changed_paths:
+        clipped = list(changed_paths[:_FOLLOWUP_MAX_CHANGED_PATHS])
+        suffix = " …" if len(changed_paths) > _FOLLOWUP_MAX_CHANGED_PATHS else ""
+        learned.append(f"changed_paths={', '.join(clipped)}{suffix}")
+    if not learned:
+        learned.append("no additional signals")
+
+    lines = [
+        f"{_TIMEOUT_SUMMARY_MARKER} RUN_ID={run_id} bead_id={bead_id} title={title!r}",
+        f"Tried: {', '.join(tried)}",
+        f"Problems: {', '.join(problems)}",
+        f"Learned: {', '.join(learned)}",
+    ]
+    return _truncate_note("\n".join(lines))
+
+
+def _format_followup_description(
+    *,
+    run_id: str,
+    parent_bead_id: str,
+    parent_title: str,
+    summary: str,
+    focus: str,
+) -> str:
+    lines = [
+        f"Derived from {parent_bead_id} ({parent_title}) after timeout in RUN_ID={run_id}.",
+        f"Scope: {focus}",
+        "",
+        "Context:",
+        summary,
+    ]
+    return _truncate_note("\n".join(lines))
+
+
+def _maybe_decompose_timeout_bead(
+    *,
+    repo_root: Path,
+    issue: Any,
+    item: RunDeckItem,
+    run_id: str,
+    attempt: int,
+    failed_commands: Sequence[str],
+    baseline_failures: Sequence[str],
+    validation_results: Mapping[str, ValidationResult],
+    changed_paths: Sequence[str],
+) -> tuple[str | None, tuple[str, ...]]:
+    if issue.status in {"closed", "blocked"}:
+        return None, ()
+    if _DECOMPOSE_MARKER in (issue.notes or ""):
+        return None, ()
+
+    summary = _format_timeout_summary(
+        run_id=run_id,
+        bead_id=item.bead_id,
+        title=item.title,
+        attempt=attempt,
+        failed_commands=failed_commands,
+        baseline_failures=baseline_failures,
+        validation_results=validation_results,
+        changed_paths=changed_paths,
+    )
+
+    try:
+        from codex_orchestrator.beads_subprocess import bd_create, bd_list_open_titles
+    except Exception:
+        return summary, ()
+
+    try:
+        open_titles = bd_list_open_titles(repo_root=repo_root)
+    except Exception as e:
+        return _truncate_note(summary + f"\n[orchestrator] Follow-up creation failed: {e}"), ()
+    created_ids: list[str] = []
+
+    priority = issue.priority if getattr(issue, "priority", None) is not None else 2
+    issue_type = issue.issue_type if getattr(issue, "issue_type", None) in {
+        "bug",
+        "feature",
+        "task",
+        "epic",
+        "chore",
+    } else "task"
+    deps = (f"discovered-from:{item.bead_id}",)
+
+    def _create_followup(*, title: str, focus: str) -> None:
+        if title in open_titles:
+            return
+        try:
+            created = bd_create(
+                repo_root=repo_root,
+                title=title,
+                issue_type=issue_type,
+                priority=int(priority),
+                description=_format_followup_description(
+                    run_id=run_id,
+                    parent_bead_id=item.bead_id,
+                    parent_title=item.title,
+                    summary=summary,
+                    focus=focus,
+                ),
+                deps=deps,
+            )
+        except Exception:
+            return
+        created_ids.append(created.issue_id)
+
+    if failed_commands:
+        for cmd in sorted(set(failed_commands)):
+            focus = f"Make `{cmd}` pass with minimal changes."
+            title = f"Fix validation failure ({cmd}) for {item.title}"
+            _create_followup(title=title, focus=focus)
+    else:
+        title = f"Break down next step for {item.title}"
+        focus = "Identify the smallest concrete next change and capture a short plan."
+        _create_followup(title=title, focus=focus)
+
+    return summary, tuple(created_ids)
 
 
 def _remaining_bead_time(
@@ -1677,12 +1843,50 @@ def execute_repo_tick(
                                 f"{attempt_note}."
                             )
 
+                        timeout_summary, followup_ids = _maybe_decompose_timeout_bead(
+                            repo_root=repo_policy.path,
+                            issue=issue,
+                            item=item,
+                            run_id=run_id,
+                            attempt=attempt,
+                            failed_commands=failed_commands,
+                            baseline_failures=baseline_failures,
+                            validation_results=validation_results,
+                            changed_paths=changed_paths,
+                        )
+                        extra_notes = ""
+                        if timeout_summary:
+                            extra_notes += "\n" + timeout_summary
+                        if followup_ids:
+                            extra_notes += (
+                                "\n"
+                                + _DECOMPOSE_MARKER
+                                + ": "
+                                + ", ".join(sorted(followup_ids))
+                            )
+                            follow_ups.append(
+                                f"Timeout decomposition for {item.bead_id}: created "
+                                + ", ".join(sorted(followup_ids))
+                            )
+                            if deck_path is not None and not config.replan:
+                                try:
+                                    deck_path.unlink(missing_ok=True)
+                                    follow_ups.append(
+                                        f"Cleared run deck to force replan: {deck_path.as_posix()}"
+                                    )
+                                except OSError as e:
+                                    repo_failures.append(
+                                        f"{item.bead_id}: failed to clear run deck {deck_path}: {e}"
+                                    )
+
                         bd_update(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
+                            status="blocked" if followup_ids else None,
                             notes=(issue.notes + "\n" if issue.notes else "")
                             + note_prefix
-                            + _format_validation_summary(validation_results),
+                            + _format_validation_summary(validation_results)
+                            + extra_notes,
                         )
                         bead_results.append(
                             BeadResult(
@@ -1703,6 +1907,7 @@ def execute_repo_tick(
                                     cmd: _validation_status(r.exit_code)
                                     for cmd, r in validation_results.items()
                                 },
+                                "followups": list(followup_ids) if followup_ids else [],
                             }
                         )
                         stop_reason = "blocked"
