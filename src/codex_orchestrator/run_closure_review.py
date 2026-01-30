@@ -341,10 +341,14 @@ def write_final_review(
     return RunClosureArtifacts(json_path=json_path, md_path=md_path)
 
 
-def _review_only_prompt(*, run_id: str, repo_id: str) -> str:
+def _review_only_prompt(*, run_id: str, repo_id: str, label: str | None = None) -> str:
+    if label:
+        intro = f"You are running a {label} review-only pass."
+    else:
+        intro = "You are running a review-only pass."
     return "\n".join(
         [
-            "You are running a final, review-only pass.",
+            intro,
             "",
             "Hard constraints:",
             "- Do NOT modify, create, or delete any files.",
@@ -382,6 +386,9 @@ def run_review_only_codex_pass(
     ai_settings: AiSettings,
     timeout_seconds: float = 900.0,
     repo_config_path: Path | None = None,
+    log_stem: str = "final_codex_review",
+    log_suffix: str | None = None,
+    prompt_label: str | None = None,
 ) -> tuple[CodexReviewLog, ...]:
     run_dir = paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -415,7 +422,7 @@ def run_review_only_codex_pass(
                 f"Final Codex review refused for {repo_id}: repo is dirty before review ({changed})."
             )
 
-        prompt = _review_only_prompt(run_id=run_id, repo_id=repo_id)
+        prompt = _review_only_prompt(run_id=run_id, repo_id=repo_id, label=prompt_label)
         invocation = codex_exec_full_auto(
             prompt=prompt,
             cwd=repo_root,
@@ -423,7 +430,8 @@ def run_review_only_codex_pass(
             extra_args=codex_cli_args_for_settings(ai_settings),
         )
 
-        log_path = run_dir / f"final_codex_review.{repo_id}.json"
+        suffix = f".{log_suffix}" if log_suffix else ""
+        log_path = run_dir / f"{log_stem}.{repo_id}{suffix}.json"
         write_json_atomic(
             log_path,
             {

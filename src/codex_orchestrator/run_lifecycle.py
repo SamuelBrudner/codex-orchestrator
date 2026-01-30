@@ -17,7 +17,12 @@ from codex_orchestrator.run_signoff import (
     find_latest_ended_run_id,
     validate_run_signoff,
 )
-from codex_orchestrator.run_state import CurrentRunState, RunMode, RunStateError
+from codex_orchestrator.run_state import (
+    CURRENT_RUN_STATE_SCHEMA_VERSION,
+    CurrentRunState,
+    RunMode,
+    RunStateError,
+)
 
 
 class RunLifecycleError(RuntimeError):
@@ -177,6 +182,7 @@ def _tick_run_locked(
     actionable_work_found: bool,
     idle_ticks_to_end: int,
     manual_ttl: timedelta,
+    beads_attempted_delta: int,
     now: datetime,
 ) -> TickResult:
     state = _load_current_run_state(path=paths.current_run_path, now=now)
@@ -221,7 +227,7 @@ def _tick_run_locked(
         window_end_at = DEFAULT_NIGHT_WINDOW.end_for(now) if mode == "automated" else None
         expires_at = window_end_at if window_end_at is not None else now + manual_ttl
         state = CurrentRunState(
-            schema_version=1,
+            schema_version=CURRENT_RUN_STATE_SCHEMA_VERSION,
             run_id=run_id,
             mode=mode,
             created_at=now,
@@ -230,6 +236,8 @@ def _tick_run_locked(
             window_end_at=window_end_at,
             tick_count=0,
             consecutive_idle_ticks=0,
+            beads_attempted_total=0,
+            beads_attempted_since_review=0,
         )
 
     state = state.on_tick(
@@ -237,6 +245,7 @@ def _tick_run_locked(
         actionable_work_found=actionable_work_found,
         idle_ticks_to_end=idle_ticks_to_end,
         manual_ttl=manual_ttl,
+        beads_attempted_delta=beads_attempted_delta,
     )
 
     _ensure_run_artifacts(paths, state=state)
@@ -251,7 +260,10 @@ def _tick_run_locked(
         ),
     )
 
-    end_reason = state.should_end(now=now, idle_ticks_to_end=idle_ticks_to_end)
+    end_reason = state.should_end(
+        now=now,
+        idle_ticks_to_end=idle_ticks_to_end,
+    )
     if end_reason is not None:
         _append_run_log(
             paths,
@@ -283,6 +295,7 @@ def tick_run(
     actionable_work_found: bool = False,
     idle_ticks_to_end: int = 3,
     manual_ttl: timedelta = timedelta(hours=12),
+    beads_attempted_delta: int = 0,
     now: datetime | None = None,
     run_lock: RunLock | None = None,
 ) -> TickResult:
@@ -302,6 +315,7 @@ def tick_run(
                 actionable_work_found=actionable_work_found,
                 idle_ticks_to_end=idle_ticks_to_end,
                 manual_ttl=manual_ttl,
+                beads_attempted_delta=beads_attempted_delta,
                 now=now,
             )
 
@@ -312,8 +326,55 @@ def tick_run(
                 actionable_work_found=actionable_work_found,
                 idle_ticks_to_end=idle_ticks_to_end,
                 manual_ttl=manual_ttl,
+                beads_attempted_delta=beads_attempted_delta,
                 now=now,
             )
+    except RunLockError as e:
+        raise RunLifecycleError(str(e)) from e
+    except RunStateError as e:
+        raise RunLifecycleError(str(e)) from e
+
+
+def record_review(
+    *,
+    paths: OrchestratorPaths,
+    run_id: str,
+    now: datetime | None = None,
+    run_lock: RunLock | None = None,
+) -> CurrentRunState | None:
+    if now is None:
+        now = datetime.now().astimezone()
+    if now.tzinfo is None:
+        raise RunLifecycleError("record_review requires a timezone-aware now datetime.")
+
+    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _record_locked() -> CurrentRunState | None:
+        state = _load_current_run_state(path=paths.current_run_path, now=now)
+        if state is None:
+            return None
+        if state.run_id != run_id:
+            raise RunLifecycleError(
+                f"record_review run_id mismatch: expected {run_id}, found {state.run_id}"
+            )
+        if state.beads_attempted_since_review == 0:
+            return state
+        updated = state.reset_review_counter()
+        _write_json_atomic(paths.current_run_path, updated.to_json_dict())
+        _append_run_log(
+            paths,
+            run_id=run_id,
+            message=f"{now.isoformat()} review_cadence status=ok",
+        )
+        return updated
+
+    try:
+        if run_lock is not None:
+            _require_held_run_lock(paths, run_lock=run_lock)
+            return _record_locked()
+
+        with RunLock(paths.run_lock_path):
+            return _record_locked()
     except RunLockError as e:
         raise RunLifecycleError(str(e)) from e
     except RunStateError as e:
@@ -385,7 +446,7 @@ def ensure_active_run(
         window_end_at = DEFAULT_NIGHT_WINDOW.end_for(now) if mode == "automated" else None
         expires_at = window_end_at if window_end_at is not None else now + manual_ttl
         state = CurrentRunState(
-            schema_version=1,
+            schema_version=CURRENT_RUN_STATE_SCHEMA_VERSION,
             run_id=run_id,
             mode=mode,
             created_at=now,
@@ -394,6 +455,8 @@ def ensure_active_run(
             window_end_at=window_end_at,
             tick_count=0,
             consecutive_idle_ticks=0,
+            beads_attempted_total=0,
+            beads_attempted_since_review=0,
         )
         _ensure_run_artifacts(paths, state=state)
         _write_json_atomic(paths.current_run_path, state.to_json_dict())

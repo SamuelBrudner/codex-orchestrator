@@ -22,7 +22,7 @@ from codex_orchestrator.run_closure_review import (
     run_review_only_codex_pass,
     write_final_review,
 )
-from codex_orchestrator.run_lifecycle import TickResult, ensure_active_run, tick_run
+from codex_orchestrator.run_lifecycle import TickResult, ensure_active_run, record_review, tick_run
 from codex_orchestrator.run_lock import RunLock, RunLockError
 from codex_orchestrator.run_state import RunMode
 
@@ -101,6 +101,7 @@ def run_orchestrator_cycle(
     diff_cap_lines: int = 1500,
     replan: bool = False,
     final_review_codex_review: bool = False,
+    review_every_beads: int | None = None,
     now: datetime | None = None,
     focus: str | None = None,
 ) -> OrchestratorCycleResult:
@@ -182,6 +183,7 @@ def run_orchestrator_cycle(
                 config=config,
             )
             actionable_work_found = any(r.beads_attempted > 0 for r in repo_results)
+            beads_attempted_total = sum(r.beads_attempted for r in repo_results)
             if (
                 mode == "manual"
                 and not actionable_work_found
@@ -199,6 +201,7 @@ def run_orchestrator_cycle(
                 actionable_work_found=actionable_work_found,
                 idle_ticks_to_end=idle_ticks_to_end,
                 manual_ttl=manual_ttl,
+                beads_attempted_delta=beads_attempted_total,
                 now=datetime.now().astimezone(),
                 run_lock=lock,
             )
@@ -213,6 +216,39 @@ def run_orchestrator_cycle(
                             repo_config_path=repo_config_path,
                         )
                 except RunClosureReviewError as e:
+                    raise OrchestratorCycleError(str(e)) from e
+            if (
+                tick_result.state is not None
+                and review_every_beads is not None
+                and tick_result.state.review_due(review_every_beads=review_every_beads)
+            ):
+                _append_run_log(
+                    paths,
+                    run_id=tick_result.state.run_id,
+                    message="review_cadence status=starting",
+                )
+                try:
+                    run_review_only_codex_pass(
+                        paths,
+                        run_id=tick_result.state.run_id,
+                        ai_settings=ai_settings,
+                        repo_config_path=repo_config_path,
+                        log_stem="cadence_codex_review",
+                        log_suffix=f"tick{tick_result.state.tick_count}",
+                        prompt_label="cadence",
+                    )
+                    record_review(
+                        paths=paths,
+                        run_id=tick_result.state.run_id,
+                        now=datetime.now().astimezone(),
+                        run_lock=lock,
+                    )
+                except RunClosureReviewError as e:
+                    _append_run_log(
+                        paths,
+                        run_id=tick_result.state.run_id,
+                        message=f"review_cadence status=error error={e}",
+                    )
                     raise OrchestratorCycleError(str(e)) from e
 
             return OrchestratorCycleResult(

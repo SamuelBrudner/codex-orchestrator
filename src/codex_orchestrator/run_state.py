@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
 RunMode = Literal["automated", "manual"]
+
+CURRENT_RUN_STATE_SCHEMA_VERSION = 3
 
 
 class RunStateError(ValueError):
@@ -40,6 +42,8 @@ class CurrentRunState:
     window_end_at: datetime | None
     tick_count: int
     consecutive_idle_ticks: int
+    beads_attempted_total: int
+    beads_attempted_since_review: int
 
     def is_expired(self, *, now: datetime) -> bool:
         if now.tzinfo is None:
@@ -53,6 +57,7 @@ class CurrentRunState:
         actionable_work_found: bool,
         idle_ticks_to_end: int,
         manual_ttl: timedelta,
+        beads_attempted_delta: int = 0,
     ) -> CurrentRunState:
         if now.tzinfo is None:
             raise RunStateError("now must be timezone-aware.")
@@ -60,6 +65,8 @@ class CurrentRunState:
             raise RunStateError(f"idle_ticks_to_end must be >= 1, got {idle_ticks_to_end}")
         if manual_ttl <= timedelta(0):
             raise RunStateError("manual_ttl must be positive.")
+        if beads_attempted_delta < 0:
+            raise RunStateError("beads_attempted_delta must be >= 0.")
 
         if actionable_work_found:
             consecutive_idle_ticks = 0
@@ -81,6 +88,8 @@ class CurrentRunState:
             window_end_at=self.window_end_at,
             tick_count=self.tick_count + 1,
             consecutive_idle_ticks=consecutive_idle_ticks,
+            beads_attempted_total=self.beads_attempted_total + beads_attempted_delta,
+            beads_attempted_since_review=self.beads_attempted_since_review + beads_attempted_delta,
         )
 
     def should_end(self, *, now: datetime, idle_ticks_to_end: int) -> str | None:
@@ -92,6 +101,14 @@ class CurrentRunState:
             return "idle_ticks"
         return None
 
+    def review_due(self, *, review_every_beads: int | None) -> bool:
+        if review_every_beads is None or review_every_beads <= 0:
+            return False
+        return self.beads_attempted_since_review >= review_every_beads
+
+    def reset_review_counter(self) -> CurrentRunState:
+        return replace(self, beads_attempted_since_review=0)
+
     def to_json_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "schema_version": self.schema_version,
@@ -102,6 +119,8 @@ class CurrentRunState:
             "expires_at": self.expires_at.isoformat(),
             "tick_count": self.tick_count,
             "consecutive_idle_ticks": self.consecutive_idle_ticks,
+            "beads_attempted_total": self.beads_attempted_total,
+            "beads_attempted_since_review": self.beads_attempted_since_review,
         }
         if self.window_end_at is not None:
             payload["window_end_at"] = self.window_end_at.isoformat()
@@ -113,7 +132,7 @@ class CurrentRunState:
             raise RunStateError(f"Expected dict for run state, got {type(data).__name__}")
 
         schema_version = _as_int(data.get("schema_version"), field="schema_version")
-        if schema_version != 1:
+        if schema_version not in (1, 2, 3):
             raise RunStateError(f"Unsupported schema_version: {schema_version}")
 
         run_id = data.get("run_id")
@@ -134,9 +153,22 @@ class CurrentRunState:
         consecutive_idle_ticks = _as_int(
             data.get("consecutive_idle_ticks"), field="consecutive_idle_ticks"
         )
+        if schema_version == 1:
+            beads_attempted_total = 0
+            beads_attempted_since_review = 0
+        else:
+            beads_attempted_total = _as_int(
+                data.get("beads_attempted_total"), field="beads_attempted_total"
+            )
+            if schema_version == 2:
+                beads_attempted_since_review = beads_attempted_total
+            else:
+                beads_attempted_since_review = _as_int(
+                    data.get("beads_attempted_since_review"), field="beads_attempted_since_review"
+                )
 
         return cls(
-            schema_version=schema_version,
+            schema_version=CURRENT_RUN_STATE_SCHEMA_VERSION,
             run_id=run_id,
             mode=mode,
             created_at=created_at,
@@ -145,5 +177,6 @@ class CurrentRunState:
             window_end_at=window_end_at,
             tick_count=tick_count,
             consecutive_idle_ticks=consecutive_idle_ticks,
+            beads_attempted_total=beads_attempted_total,
+            beads_attempted_since_review=beads_attempted_since_review,
         )
-

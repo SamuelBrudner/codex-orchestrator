@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from codex_orchestrator.paths import OrchestratorPaths
-from codex_orchestrator.run_lifecycle import tick_run
+from codex_orchestrator.run_lifecycle import record_review, tick_run
+from codex_orchestrator.run_state import CurrentRunState
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -86,3 +87,39 @@ def test_automated_tick_outside_window_does_not_start_run(tmp_path: Path) -> Non
     assert result.end_reason == "outside_window"
     assert not paths.current_run_path.exists()
     assert not paths.runs_dir.exists()
+
+
+def test_tick_tracks_review_cadence_without_ending_run(tmp_path: Path) -> None:
+    paths = OrchestratorPaths(cache_dir=tmp_path)
+    t0 = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(minutes=1)
+
+    r0 = tick_run(
+        paths=paths,
+        mode="manual",
+        now=t0,
+        idle_ticks_to_end=10,
+        beads_attempted_delta=1,
+    )
+    assert r0.ended is False
+    assert paths.current_run_path.exists()
+    state0 = CurrentRunState.from_json_dict(_read_json(paths.current_run_path))
+    assert state0.beads_attempted_since_review == 1
+    assert state0.review_due(review_every_beads=2) is False
+
+    r1 = tick_run(
+        paths=paths,
+        mode="manual",
+        now=t1,
+        idle_ticks_to_end=10,
+        beads_attempted_delta=1,
+    )
+    assert r1.ended is False
+    assert paths.current_run_path.exists()
+    state1 = CurrentRunState.from_json_dict(_read_json(paths.current_run_path))
+    assert state1.beads_attempted_since_review == 2
+    assert state1.review_due(review_every_beads=2) is True
+
+    record_review(paths=paths, run_id=state1.run_id, now=t1)
+    state2 = CurrentRunState.from_json_dict(_read_json(paths.current_run_path))
+    assert state2.beads_attempted_since_review == 0

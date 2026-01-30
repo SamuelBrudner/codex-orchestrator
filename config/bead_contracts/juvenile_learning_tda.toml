@@ -13,3 +13,6 @@ allow_env_creation = true
 
 # Notebooks are executed only when explicitly required.
 requires_notebook_execution = false
+
+# Behavioral validation command(s).
+validation_commands = ["pytest -q"]

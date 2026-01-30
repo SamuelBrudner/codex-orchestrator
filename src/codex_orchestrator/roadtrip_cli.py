@@ -122,6 +122,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Cap beads attempted per repo per tick.",
     )
     p.add_argument(
+        "--review-every-beads",
+        type=int,
+        default=None,
+        help="Run a review-only Codex pass after N beads are attempted (does not end the run).",
+    )
+    p.add_argument(
         "--diff-cap-files",
         type=int,
         default=25,
@@ -219,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
                 diff_cap_lines=int(args.diff_cap_lines),
                 replan=bool(args.replan),
                 final_review_codex_review=bool(args.final_review_codex),
+                review_every_beads=int(args.review_every_beads) if args.review_every_beads is not None else None,
                 now=now,
                 focus=focus,
             )

@@ -400,6 +400,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             diff_cap_lines=int(args.diff_cap_lines),
             replan=bool(args.replan),
             final_review_codex_review=bool(args.final_review_codex),
+            review_every_beads=int(args.review_every_beads) if args.review_every_beads is not None else None,
             focus=focus,
         )
     except (OrchestratorCycleError, RunLifecycleError) as e:
@@ -777,6 +778,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Cap beads attempted per repo per tick.",
+    )
+    run_parser.add_argument(
+        "--review-every-beads",
+        type=int,
+        default=None,
+        help="Run a review-only Codex pass after N beads are attempted (does not end the run).",
     )
     run_parser.add_argument(
         "--diff-cap-files",
