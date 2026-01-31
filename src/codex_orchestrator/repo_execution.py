@@ -86,6 +86,7 @@ BeadOutcome = Literal[
 ]
 
 _TIMEOUT_SUMMARY_MARKER = "[orchestrator] Timeout summary"
+_DIFFCAP_SUMMARY_MARKER = "[orchestrator] Diff cap summary"
 _DECOMPOSE_MARKER = "[orchestrator] Decomposed into follow-up beads"
 _FOLLOWUP_MAX_CHANGED_PATHS = 8
 
@@ -418,13 +419,56 @@ def _format_followup_description(
     parent_title: str,
     summary: str,
     focus: str,
+    trigger: str = "timeout",
 ) -> str:
     lines = [
-        f"Derived from {parent_bead_id} ({parent_title}) after timeout in RUN_ID={run_id}.",
+        f"Derived from {parent_bead_id} ({parent_title}) after {trigger} in RUN_ID={run_id}.",
         f"Scope: {focus}",
         "",
         "Context:",
         summary,
+    ]
+    return _truncate_note("\n".join(lines))
+
+
+def _format_diff_cap_summary(
+    *,
+    run_id: str,
+    bead_id: str,
+    title: str,
+    attempt: int,
+    cap_kind: str,
+    files_changed: int,
+    lines_added: int,
+    tick_files_changed: int,
+    tick_lines_added: int,
+    max_files_changed: int,
+    max_lines_added: int,
+    changed_paths: Sequence[str],
+) -> str:
+    tried = [
+        f"codex_attempts={attempt}",
+        f"files_changed={files_changed}",
+        f"lines_added={lines_added}",
+    ]
+    problems = [
+        f"diff cap exceeded ({cap_kind})",
+        f"tick_files_changed={tick_files_changed} max_files={max_files_changed}",
+        f"tick_lines_added={tick_lines_added} max_lines={max_lines_added}",
+    ]
+    learned: list[str] = []
+    if changed_paths:
+        clipped = list(changed_paths[:_FOLLOWUP_MAX_CHANGED_PATHS])
+        suffix = " …" if len(changed_paths) > _FOLLOWUP_MAX_CHANGED_PATHS else ""
+        learned.append(f"changed_paths={', '.join(clipped)}{suffix}")
+    else:
+        learned.append("no changed_paths captured")
+
+    lines = [
+        f"{_DIFFCAP_SUMMARY_MARKER} RUN_ID={run_id} bead_id={bead_id} title={title!r}",
+        f"Tried: {', '.join(tried)}",
+        f"Problems: {', '.join(problems)}",
+        f"Learned: {', '.join(learned)}",
     ]
     return _truncate_note("\n".join(lines))
 
@@ -508,6 +552,106 @@ def _maybe_decompose_timeout_bead(
     else:
         title = f"Break down next step for {item.title}"
         focus = "Identify the smallest concrete next change and capture a short plan."
+        _create_followup(title=title, focus=focus)
+
+    return summary, tuple(created_ids)
+
+
+def _maybe_decompose_diff_cap_bead(
+    *,
+    repo_root: Path,
+    issue: Any,
+    item: RunDeckItem,
+    run_id: str,
+    attempt: int,
+    cap_kind: str,
+    files_changed: int,
+    lines_added: int,
+    tick_files_changed: int,
+    tick_lines_added: int,
+    max_files_changed: int,
+    max_lines_added: int,
+    changed_paths: Sequence[str],
+) -> tuple[str | None, tuple[str, ...]]:
+    if issue.status in {"closed", "blocked"}:
+        return None, ()
+    if _DECOMPOSE_MARKER in (issue.notes or ""):
+        return None, ()
+
+    summary = _format_diff_cap_summary(
+        run_id=run_id,
+        bead_id=item.bead_id,
+        title=item.title,
+        attempt=attempt,
+        cap_kind=cap_kind,
+        files_changed=files_changed,
+        lines_added=lines_added,
+        tick_files_changed=tick_files_changed,
+        tick_lines_added=tick_lines_added,
+        max_files_changed=max_files_changed,
+        max_lines_added=max_lines_added,
+        changed_paths=changed_paths,
+    )
+
+    try:
+        from codex_orchestrator.beads_subprocess import bd_create, bd_list_open_titles
+    except Exception:
+        return summary, ()
+
+    try:
+        open_titles = bd_list_open_titles(repo_root=repo_root)
+    except Exception as e:
+        return _truncate_note(summary + f"\n[orchestrator] Follow-up creation failed: {e}"), ()
+    created_ids: list[str] = []
+
+    priority = issue.priority if getattr(issue, "priority", None) is not None else 2
+    issue_type = issue.issue_type if getattr(issue, "issue_type", None) in {
+        "bug",
+        "feature",
+        "task",
+        "epic",
+        "chore",
+    } else "task"
+    deps = (f"discovered-from:{item.bead_id}",)
+
+    def _create_followup(*, title: str, focus: str) -> None:
+        if title in open_titles:
+            return
+        try:
+            created = bd_create(
+                repo_root=repo_root,
+                title=title,
+                issue_type=issue_type,
+                priority=int(priority),
+                description=_format_followup_description(
+                    run_id=run_id,
+                    parent_bead_id=item.bead_id,
+                    parent_title=item.title,
+                    summary=summary,
+                    focus=focus,
+                    trigger="diff cap exceeded",
+                ),
+                deps=deps,
+            )
+        except Exception:
+            return
+        created_ids.append(created.issue_id)
+
+    if changed_paths:
+        groups: dict[str, list[str]] = {}
+        for path in changed_paths:
+            top = path.split("/", 1)[0]
+            groups.setdefault(top, []).append(path)
+        for top in sorted(groups)[:3]:
+            focus = (
+                "Reduce scope to stay within diff caps; focus changes under "
+                f"`{top}` and re-run validations."
+            )
+            title = f"Reduce scope for {item.title}: {top}"
+            _create_followup(title=title, focus=focus)
+    else:
+        title = f"Split {item.title} to fit diff caps"
+        focus = "Break the work into smaller, cap-friendly steps with minimal changes per bead."
         _create_followup(title=title, focus=focus)
 
     return summary, tuple(created_ids)
@@ -1615,13 +1759,54 @@ def execute_repo_tick(
                         break
 
                     if tick_files_changed + files_changed > config.diff_caps.max_files_changed:
+                        cap_summary, followup_ids = _maybe_decompose_diff_cap_bead(
+                            repo_root=repo_policy.path,
+                            issue=issue,
+                            item=item,
+                            run_id=run_id,
+                            attempt=attempt,
+                            cap_kind="files changed",
+                            files_changed=files_changed,
+                            lines_added=lines_added,
+                            tick_files_changed=tick_files_changed + files_changed,
+                            tick_lines_added=tick_lines_added,
+                            max_files_changed=config.diff_caps.max_files_changed,
+                            max_lines_added=config.diff_caps.max_lines_added,
+                            changed_paths=changed_paths,
+                        )
+                        extra_notes = ""
+                        if cap_summary:
+                            extra_notes += "\n" + cap_summary
+                        if followup_ids:
+                            extra_notes += (
+                                "\n"
+                                + _DECOMPOSE_MARKER
+                                + ": "
+                                + ", ".join(sorted(followup_ids))
+                            )
+                            follow_ups.append(
+                                f"Diff cap decomposition for {item.bead_id}: created "
+                                + ", ".join(sorted(followup_ids))
+                            )
+                            if deck_path is not None and not config.replan:
+                                try:
+                                    deck_path.unlink(missing_ok=True)
+                                    follow_ups.append(
+                                        f"Cleared run deck to force replan: {deck_path.as_posix()}"
+                                    )
+                                except OSError as e:
+                                    repo_failures.append(
+                                        f"{item.bead_id}: failed to clear run deck {deck_path}: {e}"
+                                    )
                         bd_update(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
+                            status="blocked" if followup_ids else None,
                             notes=(issue.notes + "\n" if issue.notes else "")
                             + "[orchestrator] Diff cap exceeded: "
                             + f"tick_files_changed={tick_files_changed + files_changed} "
-                            + f"max={config.diff_caps.max_files_changed}",
+                            + f"max={config.diff_caps.max_files_changed}"
+                            + extra_notes,
                         )
                         bead_results.append(
                             BeadResult(
@@ -1638,6 +1823,16 @@ def execute_repo_tick(
                                 "outcome": "failed",
                                 "detail": "Diff cap exceeded (files changed).",
                                 "changed_paths": list(changed_paths),
+                                "diff_cap": {
+                                    "kind": "files_changed",
+                                    "files_changed": files_changed,
+                                    "lines_added": lines_added,
+                                    "tick_files_changed": tick_files_changed + files_changed,
+                                    "tick_lines_added": tick_lines_added,
+                                    "max_files_changed": config.diff_caps.max_files_changed,
+                                    "max_lines_added": config.diff_caps.max_lines_added,
+                                },
+                                "followups": list(followup_ids) if followup_ids else [],
                             }
                         )
                         repo_failures.append(f"{item.bead_id}: diff cap exceeded (files changed).")
@@ -1646,13 +1841,54 @@ def execute_repo_tick(
                         break
 
                     if tick_lines_added + lines_added > config.diff_caps.max_lines_added:
+                        cap_summary, followup_ids = _maybe_decompose_diff_cap_bead(
+                            repo_root=repo_policy.path,
+                            issue=issue,
+                            item=item,
+                            run_id=run_id,
+                            attempt=attempt,
+                            cap_kind="lines added",
+                            files_changed=files_changed,
+                            lines_added=lines_added,
+                            tick_files_changed=tick_files_changed,
+                            tick_lines_added=tick_lines_added + lines_added,
+                            max_files_changed=config.diff_caps.max_files_changed,
+                            max_lines_added=config.diff_caps.max_lines_added,
+                            changed_paths=changed_paths,
+                        )
+                        extra_notes = ""
+                        if cap_summary:
+                            extra_notes += "\n" + cap_summary
+                        if followup_ids:
+                            extra_notes += (
+                                "\n"
+                                + _DECOMPOSE_MARKER
+                                + ": "
+                                + ", ".join(sorted(followup_ids))
+                            )
+                            follow_ups.append(
+                                f"Diff cap decomposition for {item.bead_id}: created "
+                                + ", ".join(sorted(followup_ids))
+                            )
+                            if deck_path is not None and not config.replan:
+                                try:
+                                    deck_path.unlink(missing_ok=True)
+                                    follow_ups.append(
+                                        f"Cleared run deck to force replan: {deck_path.as_posix()}"
+                                    )
+                                except OSError as e:
+                                    repo_failures.append(
+                                        f"{item.bead_id}: failed to clear run deck {deck_path}: {e}"
+                                    )
                         bd_update(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
+                            status="blocked" if followup_ids else None,
                             notes=(issue.notes + "\n" if issue.notes else "")
                             + "[orchestrator] Diff cap exceeded: "
                             + f"tick_lines_added={tick_lines_added + lines_added} "
-                            + f"max={config.diff_caps.max_lines_added}",
+                            + f"max={config.diff_caps.max_lines_added}"
+                            + extra_notes,
                         )
                         bead_results.append(
                             BeadResult(
@@ -1669,6 +1905,16 @@ def execute_repo_tick(
                                 "outcome": "failed",
                                 "detail": "Diff cap exceeded (lines added).",
                                 "changed_paths": list(changed_paths),
+                                "diff_cap": {
+                                    "kind": "lines_added",
+                                    "files_changed": files_changed,
+                                    "lines_added": lines_added,
+                                    "tick_files_changed": tick_files_changed,
+                                    "tick_lines_added": tick_lines_added + lines_added,
+                                    "max_files_changed": config.diff_caps.max_files_changed,
+                                    "max_lines_added": config.diff_caps.max_lines_added,
+                                },
+                                "followups": list(followup_ids) if followup_ids else [],
                             }
                         )
                         repo_failures.append(f"{item.bead_id}: diff cap exceeded (lines added).")
