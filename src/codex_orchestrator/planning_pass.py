@@ -99,6 +99,7 @@ def ensure_repo_run_deck(
     repo_policy: RepoPolicy,
     overlay_path: Path,
     replan: bool = False,
+    focus: str | None = None,
     now: datetime | None = None,
 ) -> RepoDeckPlan:
     if not replan:
@@ -170,6 +171,7 @@ def ensure_repo_run_deck(
         overlay_path=overlay_path,
         ready_beads=ready_beads,
         known_bead_ids=known_bead_ids,
+        focus=focus,
     )
 
     baseline_env = _baseline_env(repo_policy, planning)

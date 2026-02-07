@@ -152,7 +152,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--focus",
         default=None,
-        help="Natural language focus area for the run (interpreted by Codex during execution).",
+        help="Natural language focus area for the run (filters planned beads and guides Codex execution).",
     )
     return p
 

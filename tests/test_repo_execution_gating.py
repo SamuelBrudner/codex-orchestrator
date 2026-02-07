@@ -4,11 +4,13 @@ import json
 import os
 import stat
 import subprocess
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+import codex_orchestrator.repo_execution as repo_execution
 from codex_orchestrator.contracts import ResolvedExecutionContract
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import RunDeck, RunDeckItem, ValidationResult, write_run_deck
@@ -158,6 +160,27 @@ def _setup_repo(tmp_path: Path) -> tuple[Path, RepoPolicy]:
     return repo_root, policy
 
 
+def _add_remote_with_master(tmp_path: Path, *, name: str, unique: str, repo_root: Path) -> None:
+    source = tmp_path / f"{name}-{unique}-source"
+    source.mkdir(parents=True, exist_ok=True)
+    _git(source, "init", "-b", "master")
+    _git(source, "config", "user.name", "Test")
+    _git(source, "config", "user.email", "test@example.com")
+    (source / f"{name}-{unique}.txt").write_text("x\n", encoding="utf-8")
+    _git(source, "add", "-A")
+    _git(source, "commit", "-m", f"init {name}")
+
+    bare = tmp_path / f"{name}-{unique}.git"
+    subprocess.run(
+        ["git", "clone", "--bare", source.as_posix(), bare.as_posix()],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _git(repo_root, "remote", "add", name, bare.as_posix())
+    _git(repo_root, "fetch", name)
+
+
 def _write_deck(paths: OrchestratorPaths, *, run_id: str, bead_ids: list[str]) -> None:
     contract = ResolvedExecutionContract(
         time_budget_minutes=10,
@@ -269,3 +292,95 @@ def test_bead_cap_limits_attempts(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert result.skipped is False
     assert result.beads_attempted == 1
     assert result.stop_reason == "bead_cap"
+
+
+def test_ambiguous_base_branch_prefers_origin_remote_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_fake_tools(tmp_path, monkeypatch)
+    repo_root, policy = _setup_repo(tmp_path)
+    _write_fake_issues(repo_root, ["bd-1"])
+    _add_remote_with_master(tmp_path, name="origin", unique="a", repo_root=repo_root)
+    _add_remote_with_master(tmp_path, name="upstream", unique="b", repo_root=repo_root)
+    policy = replace(policy, base_branch="master")
+
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "20250101-000000-deadbeef"
+    _write_deck(paths, run_id=run_id, bead_ids=["bd-1"])
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=10))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=10),
+            min_minutes_to_start_new_bead=15,
+            max_beads_per_tick=3,
+            diff_caps=DiffCaps(max_files_changed=50, max_lines_added=500),
+        ),
+    )
+    assert result.skipped is False
+    assert result.stop_reason == "tick_time_remaining"
+    assert result.branch == f"run/{run_id}"
+
+
+def test_validation_timeout_is_capped_by_remaining_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_fake_tools(tmp_path, monkeypatch)
+    repo_root, policy = _setup_repo(tmp_path)
+    _write_fake_issues(repo_root, ["bd-1"])
+
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "20250101-000000-deadbeef"
+    _write_deck(paths, run_id=run_id, bead_ids=["bd-1"])
+
+    captured: dict[str, float] = {}
+
+    def _fake_validation(
+        commands: tuple[str, ...] | list[str],
+        *,
+        cwd: Path,
+        env: str | None = None,
+        timeout_seconds: float = 900.0,
+        output_limit_chars: int = 20_000,
+    ) -> dict[str, ValidationResult]:
+        del commands, cwd, env, output_limit_chars
+        captured["timeout_seconds"] = timeout_seconds
+        now = datetime.now().astimezone()
+        return {
+            "pytest -q": ValidationResult(
+                command="pytest -q",
+                exit_code=0,
+                started_at=now,
+                finished_at=now,
+                stdout="",
+                stderr="",
+            )
+        }
+
+    monkeypatch.setattr(repo_execution, "run_validation_commands", _fake_validation)
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(seconds=3))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(seconds=3),
+            min_minutes_to_start_new_bead=0,
+            max_beads_per_tick=1,
+            diff_caps=DiffCaps(max_files_changed=50, max_lines_added=500),
+        ),
+    )
+    assert result.skipped is False
+    assert result.beads_attempted == 1
+    assert "timeout_seconds" in captured
+    assert captured["timeout_seconds"] <= 3.0

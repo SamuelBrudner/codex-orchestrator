@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -16,6 +17,33 @@ from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.repo_inventory import RepoPolicy
 
 logger = logging.getLogger(__name__)
+
+_FOCUS_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+_FOCUS_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "to",
+        "with",
+    }
+)
 
 
 class PlannerError(RuntimeError):
@@ -168,12 +196,40 @@ class PlanningResult:
     skipped_beads: tuple[SkippedBead, ...]
 
 
+def _focus_terms(focus: str | None) -> tuple[str, ...]:
+    if focus is None:
+        return ()
+    raw = str(focus).strip().lower()
+    if not raw:
+        return ()
+    terms: list[str] = []
+    for token in _FOCUS_TOKEN_RE.findall(raw):
+        if token in _FOCUS_STOPWORDS:
+            continue
+        if len(token) < 3:
+            continue
+        terms.append(token)
+    # Preserve first occurrence order while deduplicating.
+    return tuple(dict.fromkeys(terms))
+
+
+def _matches_focus(bead: ReadyBead, *, focus_terms: Sequence[str]) -> bool:
+    if not focus_terms:
+        return True
+    searchable_text = " ".join([bead.title, bead.description, *bead.labels]).lower()
+    if not searchable_text.strip():
+        return False
+    searchable_tokens = set(_FOCUS_TOKEN_RE.findall(searchable_text))
+    return any(term in searchable_tokens for term in focus_terms)
+
+
 def plan_deck_items(
     *,
     repo_policy: RepoPolicy,
     overlay_path: Path,
     ready_beads: Sequence[ReadyBead],
     known_bead_ids: set[str] | None = None,
+    focus: str | None = None,
 ) -> PlanningResult:
     if known_bead_ids is None:
         known_bead_ids = {bead.bead_id for bead in ready_beads}
@@ -184,9 +240,24 @@ def plan_deck_items(
         known_bead_ids=known_bead_ids,
     )
 
+    focus_tokens = _focus_terms(focus)
+
     deck_items: list[PlannedDeckItem] = []
     skipped: list[SkippedBead] = []
     for bead in ready_beads:
+        if not _matches_focus(bead, focus_terms=focus_tokens):
+            skipped.append(
+                SkippedBead(
+                    bead_id=bead.bead_id,
+                    title=bead.title,
+                    next_action=(
+                        f"Excluded by focus filter: {focus!r}. "
+                        "Use a broader focus or run without --focus."
+                    ),
+                )
+            )
+            continue
+
         try:
             contract = resolve_execution_contract(
                 repo_policy=repo_policy,

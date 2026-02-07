@@ -40,11 +40,13 @@ from codex_orchestrator.git_subprocess import (
     git_fetch,
     git_head_is_detached,
     git_is_dirty,
+    git_remote_branch_exists,
+    git_remotes,
     git_remove_ignored_untracked,
     git_rev_parse,
-    resolve_dirty_ignore_globs,
     git_stage_all,
     git_status_filtered,
+    resolve_dirty_ignore_globs,
     validate_paths_within_policy,
 )
 from codex_orchestrator.paths import OrchestratorPaths
@@ -676,6 +678,20 @@ def _can_retry_validation(*, tick: TickBudget, now: datetime, bead_deadline: dat
     ) >= timedelta(seconds=MIN_VALIDATION_RETRY_SECONDS)
 
 
+def _validation_timeout_seconds(
+    *,
+    commands: Sequence[str],
+    remaining: timedelta,
+    configured_timeout_seconds: float,
+) -> float:
+    command_count = max(1, len({c.strip() for c in commands if c.strip()}))
+    remaining_seconds = max(0.0, remaining.total_seconds())
+    if remaining_seconds <= 0:
+        return 1.0
+    per_command_budget = remaining_seconds / float(command_count)
+    return max(1.0, min(float(configured_timeout_seconds), per_command_budget))
+
+
 def _append_log(path: Path, message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -966,13 +982,40 @@ def _commit_failure_snapshot(
     return git_commit(repo_root=repo_root, subject=subject, body=body)
 
 
+def _ordered_remotes(remotes: Sequence[str]) -> list[str]:
+    preferred = ("origin", "upstream")
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in preferred:
+        if name in remotes and name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    for name in remotes:
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    return ordered
+
+
+def _resolve_base_ref(*, repo_root: Path, base_branch: str) -> str:
+    if git_branch_exists(repo_root=repo_root, branch=base_branch):
+        return base_branch
+
+    remotes = _ordered_remotes(git_remotes(repo_root=repo_root))
+    for remote in remotes:
+        if git_remote_branch_exists(repo_root=repo_root, remote=remote, branch=base_branch):
+            return f"refs/remotes/{remote}/{base_branch}"
+
+    return base_branch
+
+
 def _ensure_run_branch(
     *,
     repo_root: Path,
     run_id: str,
     base_branch: str,
     dirty_ignore_globs: Sequence[str],
-) -> str:
+) -> tuple[str, str | None]:
     try:
         if git_is_dirty(repo_root=repo_root, ignore_globs=dirty_ignore_globs):
             raise RepoExecutionError("Repo is dirty; refusing to run unattended work.")
@@ -983,22 +1026,23 @@ def _ensure_run_branch(
     except GitError as e:
         raise RepoExecutionError(str(e)) from e
 
+    fetch_error: str | None = None
     try:
         git_fetch(repo_root=repo_root)
     except GitError as e:
-        raise RepoExecutionError(f"git fetch failed: {e}") from e
+        fetch_error = str(e)
 
     run_branch = f"run/{run_id}"
     try:
         if git_branch_exists(repo_root=repo_root, branch=run_branch):
             git_checkout(repo_root=repo_root, ref=run_branch)
-            return run_branch
+            return run_branch, fetch_error
 
-        git_checkout(repo_root=repo_root, ref=base_branch)
-        git_checkout_new_branch(repo_root=repo_root, branch=run_branch, base_ref=base_branch)
+        base_ref = _resolve_base_ref(repo_root=repo_root, base_branch=base_branch)
+        git_checkout_new_branch(repo_root=repo_root, branch=run_branch, base_ref=base_ref)
     except GitError as e:
         raise RepoExecutionError(f"git branch setup failed: {e}") from e
-    return run_branch
+    return run_branch, fetch_error
 
 
 def _baseline_by_command(item: RunDeckItem) -> dict[str, ValidationResult]:
@@ -1263,7 +1307,7 @@ def execute_repo_tick(
                         emit("repo_dirty_cleanup", removed=removed_paths)
 
             try:
-                run_branch = _ensure_run_branch(
+                run_branch, fetch_error = _ensure_run_branch(
                     repo_root=repo_policy.path,
                     run_id=run_id,
                     base_branch=repo_policy.base_branch,
@@ -1331,6 +1375,15 @@ def execute_repo_tick(
                     )
                 )
 
+            if fetch_error:
+                warning = f"git fetch failed; proceeding with local refs only: {fetch_error}"
+                repo_failures.append(warning)
+                emit("git_fetch_warning", error=fetch_error)
+                _append_log(
+                    exec_log_path,
+                    f"{_now().isoformat()} git_fetch_warning error={fetch_error}",
+                )
+
             emit("repo_start", branch=run_branch, base_branch=repo_policy.base_branch)
             _append_log(
                 run_log_path,
@@ -1352,6 +1405,7 @@ def execute_repo_tick(
                     repo_policy=repo_policy,
                     overlay_path=overlay_path,
                     replan=config.replan,
+                    focus=config.focus,
                     now=_now(),
                 )
                 deck_path = deck_plan.deck_path
@@ -2021,11 +2075,20 @@ def execute_repo_tick(
                         maybe_write_repo_report(branch=run_branch)
                         break
 
+                    validation_timeout_seconds = _validation_timeout_seconds(
+                        commands=item.contract.validation_commands,
+                        remaining=_remaining_bead_time(
+                            tick=tick,
+                            now=_now(),
+                            bead_deadline=bead_deadline,
+                        ),
+                        configured_timeout_seconds=config.validation_timeout_seconds,
+                    )
                     validation_results = run_validation_commands(
                         item.contract.validation_commands,
                         cwd=repo_policy.path,
                         env=item.contract.env,
-                        timeout_seconds=config.validation_timeout_seconds,
+                        timeout_seconds=validation_timeout_seconds,
                     )
                     for cmd, r in validation_results.items():
                         validation_status_by_command[cmd] = _validation_status(r.exit_code)

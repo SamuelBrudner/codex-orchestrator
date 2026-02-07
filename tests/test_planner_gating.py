@@ -131,3 +131,50 @@ def test_planner_writes_deck_items_with_resolved_contract_snapshot(tmp_path: Pat
     written = read_run_deck(out_path)
     assert written.items[0].contract.env == "default_env"
     assert written.items[0].baseline_validation[0].command == "pytest -q"
+
+
+def test_planner_focus_filters_ready_beads_into_deck(tmp_path: Path) -> None:
+    overlay_path = tmp_path / "test_repo.toml"
+    _write_overlay(
+        overlay_path,
+        "\n".join(
+            [
+                "[defaults]",
+                "time_budget_minutes = 45",
+                "allow_env_creation = false",
+                "requires_notebook_execution = false",
+                'validation_commands = ["pytest -q"]',
+                'env = "default_env"',
+                "",
+            ]
+        ),
+    )
+
+    policy = _policy(tmp_path=tmp_path)
+    beads = [
+        ReadyBead(
+            bead_id="bd-scope",
+            title="Simplify plume nav simulation agent loop",
+            labels=("scope:plume-simplify",),
+            description="Reduce branching and duplicate state transitions in plume_nav_sim.",
+        ),
+        ReadyBead(
+            bead_id="bd-other",
+            title="Fix docs typos in unrelated package",
+            labels=("docs",),
+            description="Unrelated cleanup.",
+        ),
+    ]
+
+    result = plan_deck_items(
+        repo_policy=policy,
+        overlay_path=overlay_path,
+        ready_beads=beads,
+        known_bead_ids={"bd-scope", "bd-other"},
+        focus="plume nav sim simplification",
+    )
+
+    assert [item.bead_id for item in result.deck_items] == ["bd-scope"]
+    assert len(result.skipped_beads) == 1
+    assert result.skipped_beads[0].bead_id == "bd-other"
+    assert "Excluded by focus filter" in result.skipped_beads[0].next_action

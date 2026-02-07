@@ -299,6 +299,15 @@ def git_branch_exists(*, repo_root: Path, branch: str) -> bool:
     return completed.returncode == 0
 
 
+def git_remote_branch_exists(*, repo_root: Path, remote: str, branch: str) -> bool:
+    completed = _run_git(
+        ["show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"],
+        cwd=repo_root,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
 def git_checkout(*, repo_root: Path, ref: str) -> None:
     _run_git(["checkout", ref], cwd=repo_root, check=True)
 

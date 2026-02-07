@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -36,6 +37,13 @@ class OrchestratorCycleResult:
     ensure_result: TickResult
     tick_result: TickResult | None
     repo_results: tuple[RepoTickResult, ...]
+
+
+def _default_max_parallel(repo_count: int) -> int:
+    if repo_count <= 0:
+        return 1
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(repo_count, cpu_count, 4))
 
 
 def _append_run_log(paths: OrchestratorPaths, *, run_id: str, message: str) -> None:
@@ -169,7 +177,7 @@ def run_orchestrator_cycle(
             )
 
             if max_parallel is None or max_parallel <= 0:
-                max_parallel = max(1, len(repos))
+                max_parallel = _default_max_parallel(len(repos))
             if max_parallel < 1:
                 raise OrchestratorCycleError(f"max_parallel must be >= 1, got {max_parallel}")
 
