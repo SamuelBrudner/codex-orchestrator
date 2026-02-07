@@ -1260,3 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

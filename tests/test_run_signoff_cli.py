@@ -14,12 +14,14 @@ from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.run_signoff import RunSignoffError, validate_run_signoff, write_run_signoff
 
 
-def _run_cli(*, cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    *, cwd: Path, args: list[str], module: str = "codex_orchestrator"
+) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo_root / "src") + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.run(
-        [sys.executable, "-m", "codex_orchestrator", *args],
+        [sys.executable, "-m", module, *args],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -73,6 +75,31 @@ def test_signoff_cli_writes_artifacts(tmp_path: Path) -> None:
     assert signoff["final_review"]["sha256"] == expected_sha
 
 
+def test_signoff_cli_module_entrypoint_writes_artifacts(tmp_path: Path) -> None:
+    run_id = "20250101-000000-facefeed"
+    paths = OrchestratorPaths(cache_dir=tmp_path)
+    _write_run_end(paths=paths, run_id=run_id, ended_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
+
+    result = _run_cli(
+        cwd=tmp_path,
+        module="codex_orchestrator.cli",
+        args=[
+            "signoff",
+            "--cache-dir",
+            tmp_path.as_posix(),
+            "--run-id",
+            run_id,
+            "--reviewer",
+            "Test Reviewer",
+        ],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"RUN_ID={run_id} status=ok" in result.stdout
+    assert paths.run_signoff_json_path(run_id).exists()
+    assert paths.run_signoff_md_path(run_id).exists()
+
+
 def test_validate_run_signoff_fails_when_final_review_sha_mismatches(tmp_path: Path) -> None:
     run_id = "20250101-000000-deadbeef"
     paths = OrchestratorPaths(cache_dir=tmp_path)
@@ -100,4 +127,3 @@ def test_validate_run_signoff_fails_when_final_review_sha_mismatches(tmp_path: P
     assert "Run signoff no longer matches current final review content" in msg
     assert f"expected sha256={signoff.final_review_sha256}" in msg
     assert f"got sha256={tampered_sha}" in msg
-
