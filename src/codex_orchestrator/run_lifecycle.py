@@ -114,15 +114,15 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def _recover_orphaned_current_run(paths: OrchestratorPaths, *, now: datetime) -> None:
+def _recover_orphaned_current_run(paths: OrchestratorPaths, *, now: datetime) -> str | None:
     state = _load_current_run_state(path=paths.current_run_path, now=now)
     if state is None:
-        return
+        return None
     owner_pid = _read_lock_pid(paths.run_lock_path)
     if owner_pid is None:
-        return
+        return None
     if _pid_is_alive(owner_pid):
-        return
+        return None
     reason = "orphaned_owner_dead"
     _append_run_log(
         paths,
@@ -130,6 +130,20 @@ def _recover_orphaned_current_run(paths: OrchestratorPaths, *, now: datetime) ->
         message=f"{now.isoformat()} end_run reason={reason} owner_pid={owner_pid}",
     )
     _end_run(paths, state=state, now=now, reason=reason)
+    return state.run_id
+
+
+def recover_orphaned_current_run(
+    *,
+    paths: OrchestratorPaths,
+    now: datetime | None = None,
+) -> str | None:
+    if now is None:
+        now = datetime.now().astimezone()
+    if now.tzinfo is None:
+        raise RunLifecycleError("recover_orphaned_current_run requires a timezone-aware now datetime.")
+    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    return _recover_orphaned_current_run(paths, now=now)
 
 
 def _ensure_run_artifacts(paths: OrchestratorPaths, *, state: CurrentRunState) -> None:

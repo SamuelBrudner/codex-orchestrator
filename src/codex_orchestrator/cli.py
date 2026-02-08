@@ -34,7 +34,11 @@ from codex_orchestrator.run_closure_review import (
     run_review_only_codex_pass,
     write_final_review,
 )
-from codex_orchestrator.run_lifecycle import RunLifecycleError, tick_run
+from codex_orchestrator.run_lifecycle import (
+    RunLifecycleError,
+    recover_orphaned_current_run,
+    tick_run,
+)
 from codex_orchestrator.run_signoff import (
     RunSignoff,
     RunSignoffError,
@@ -113,6 +117,11 @@ def _cmd_tick(args: argparse.Namespace) -> int:
 
 
 def _load_current_run_id(paths: OrchestratorPaths) -> str:
+    try:
+        recover_orphaned_current_run(paths=paths)
+    except RunLifecycleError as e:
+        raise SystemExit(f"codex-orchestrator: failed orphaned-run recovery: {e}") from e
+
     try:
         data = json.loads(paths.current_run_path.read_text(encoding="utf-8"))
     except FileNotFoundError as e:

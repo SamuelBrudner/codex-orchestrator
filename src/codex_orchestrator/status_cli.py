@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from codex_orchestrator.paths import OrchestratorPaths, default_cache_dir
+from codex_orchestrator.run_lifecycle import RunLifecycleError, recover_orphaned_current_run
 
 
 def _read_json(path: Path) -> Any:
@@ -13,6 +14,11 @@ def _read_json(path: Path) -> Any:
 
 
 def _load_current_run_id(paths: OrchestratorPaths) -> str:
+    try:
+        recover_orphaned_current_run(paths=paths)
+    except RunLifecycleError as e:
+        raise SystemExit(f"codex-status: failed orphaned-run recovery: {e}") from e
+
     try:
         data = _read_json(paths.current_run_path)
     except FileNotFoundError as e:
@@ -106,4 +112,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

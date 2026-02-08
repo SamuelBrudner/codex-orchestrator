@@ -6,7 +6,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from codex_orchestrator.paths import OrchestratorPaths
-from codex_orchestrator.run_lifecycle import ensure_active_run, record_review, tick_run
+from codex_orchestrator.run_lifecycle import (
+    ensure_active_run,
+    record_review,
+    recover_orphaned_current_run,
+    tick_run,
+)
 from codex_orchestrator.run_state import CurrentRunState
 
 
@@ -177,6 +182,27 @@ def test_tick_run_recovers_orphaned_current_run(tmp_path: Path) -> None:
     assert recovered.started_new is True
     assert recovered.run_id is not None
     assert recovered.run_id != initial.run_id
+
+    run_end = _read_json(paths.run_end_path(initial.run_id))
+    assert run_end["reason"] == "orphaned_owner_dead"
+
+
+def test_recover_orphaned_current_run_marks_end_and_clears_current(tmp_path: Path) -> None:
+    paths = OrchestratorPaths(cache_dir=tmp_path)
+    t0 = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(minutes=5)
+
+    initial = tick_run(paths=paths, mode="manual", now=t0, idle_ticks_to_end=10)
+    assert initial.run_id is not None
+    dead_pid = _find_dead_pid()
+    paths.run_lock_path.write_text(
+        json.dumps({"pid": dead_pid, "locked_at": t0.isoformat()}) + "\n",
+        encoding="utf-8",
+    )
+
+    recovered_run_id = recover_orphaned_current_run(paths=paths, now=t1)
+    assert recovered_run_id == initial.run_id
+    assert not paths.current_run_path.exists()
 
     run_end = _read_json(paths.run_end_path(initial.run_id))
     assert run_end["reason"] == "orphaned_owner_dead"
