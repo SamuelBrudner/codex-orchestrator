@@ -31,6 +31,10 @@ class OrchestratorPaths:
         return self.cache_dir / "run.lock"
 
     @property
+    def cycle_in_progress_path(self) -> Path:
+        return self.cache_dir / "cycle_in_progress.json"
+
+    @property
     def runs_dir(self) -> Path:
         return self.cache_dir / "runs"
 

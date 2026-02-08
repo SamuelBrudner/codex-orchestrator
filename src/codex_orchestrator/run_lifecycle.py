@@ -118,9 +118,29 @@ def _recover_orphaned_current_run(paths: OrchestratorPaths, *, now: datetime) ->
     state = _load_current_run_state(path=paths.current_run_path, now=now)
     if state is None:
         return None
-    owner_pid = _read_lock_pid(paths.run_lock_path)
+    marker = _read_lock_pid(paths.cycle_in_progress_path)
+    if marker is None:
+        return None
+    owner_pid = marker
     if owner_pid is None:
         return None
+    try:
+        marker_payload = _read_json(paths.cycle_in_progress_path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(marker_payload, dict):
+        return None
+    marker_run_id = marker_payload.get("run_id")
+    if not isinstance(marker_run_id, str) or not marker_run_id.strip():
+        return None
+    if marker_run_id != state.run_id:
+        # Stale marker from a previous run; best-effort cleanup.
+        try:
+            paths.cycle_in_progress_path.unlink()
+        except FileNotFoundError:
+            pass
+        return None
+
     if _pid_is_alive(owner_pid):
         return None
     reason = "orphaned_owner_dead"
@@ -130,6 +150,10 @@ def _recover_orphaned_current_run(paths: OrchestratorPaths, *, now: datetime) ->
         message=f"{now.isoformat()} end_run reason={reason} owner_pid={owner_pid}",
     )
     _end_run(paths, state=state, now=now, reason=reason)
+    try:
+        paths.cycle_in_progress_path.unlink()
+    except FileNotFoundError:
+        pass
     return state.run_id
 
 

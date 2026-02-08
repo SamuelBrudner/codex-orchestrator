@@ -34,8 +34,8 @@ def _seed_orphaned_current_run(paths: OrchestratorPaths) -> str:
     initial = tick_run(paths=paths, mode="manual", now=now, idle_ticks_to_end=10)
     assert initial.run_id is not None
     dead_pid = _find_dead_pid()
-    paths.run_lock_path.write_text(
-        json.dumps({"pid": dead_pid, "locked_at": now.isoformat()}) + "\n",
+    paths.cycle_in_progress_path.write_text(
+        json.dumps({"pid": dead_pid, "run_id": initial.run_id, "started_at": now.isoformat()}) + "\n",
         encoding="utf-8",
     )
     return initial.run_id

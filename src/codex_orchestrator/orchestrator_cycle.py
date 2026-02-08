@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from codex_orchestrator.ai_policy import AiSettings
+from codex_orchestrator.audit_trail import write_json_atomic
 from codex_orchestrator.beads_subprocess import BdCliError, bd_doctor, bd_sync
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.repo_execution import (
@@ -176,114 +177,128 @@ def run_orchestrator_cycle(
                     repo_results=(),
                 )
 
+            write_json_atomic(
+                paths.cycle_in_progress_path,
+                {
+                    "pid": os.getpid(),
+                    "run_id": ensure_result.run_id,
+                    "started_at": datetime.now().astimezone().isoformat(),
+                },
+            )
             try:
-                inventory = load_repo_inventory(repo_config_path)
-            except RepoConfigError as e:
-                raise OrchestratorCycleError(str(e)) from e
+                try:
+                    inventory = load_repo_inventory(repo_config_path)
+                except RepoConfigError as e:
+                    raise OrchestratorCycleError(str(e)) from e
 
-            repos = inventory.select_repos(repo_ids=repo_ids, repo_groups=repo_groups)
-            tick = TickBudget(started_at=now, ends_at=now + tick_budget)
-            config = RepoExecutionConfig(
-                tick_budget=tick_budget,
-                min_minutes_to_start_new_bead=min_minutes_to_start_new_bead,
-                max_beads_per_tick=max_beads_per_tick,
-                diff_caps=DiffCaps(
-                    max_files_changed=diff_cap_files,
-                    max_lines_added=diff_cap_lines,
-                ),
-                replan=replan,
-                ai_settings=ai_settings,
-                focus=focus,
-            )
+                repos = inventory.select_repos(repo_ids=repo_ids, repo_groups=repo_groups)
+                tick = TickBudget(started_at=now, ends_at=now + tick_budget)
+                config = RepoExecutionConfig(
+                    tick_budget=tick_budget,
+                    min_minutes_to_start_new_bead=min_minutes_to_start_new_bead,
+                    max_beads_per_tick=max_beads_per_tick,
+                    diff_caps=DiffCaps(
+                        max_files_changed=diff_cap_files,
+                        max_lines_added=diff_cap_lines,
+                    ),
+                    replan=replan,
+                    ai_settings=ai_settings,
+                    focus=focus,
+                )
 
-            if max_parallel is None or max_parallel <= 0:
-                max_parallel = _default_max_parallel(len(repos))
-            if max_parallel < 1:
-                raise OrchestratorCycleError(f"max_parallel must be >= 1, got {max_parallel}")
+                if max_parallel is None or max_parallel <= 0:
+                    max_parallel = _default_max_parallel(len(repos))
+                if max_parallel < 1:
+                    raise OrchestratorCycleError(f"max_parallel must be >= 1, got {max_parallel}")
 
-            repo_results = execute_repos_tick(
-                paths=paths,
-                run_id=ensure_result.run_id,
-                repos=repos,
-                overlays_dir=overlays_dir,
-                max_parallel=max_parallel,
-                tick=tick,
-                config=config,
-            )
-            actionable_work_found = any(r.beads_attempted > 0 for r in repo_results)
-            beads_attempted_total = sum(r.beads_attempted for r in repo_results)
-            if (
-                mode == "manual"
-                and not actionable_work_found
-                and ensure_result.run_id is not None
-            ):
-                _attempt_beads_maintenance(
+                repo_results = execute_repos_tick(
                     paths=paths,
                     run_id=ensure_result.run_id,
                     repos=repos,
+                    overlays_dir=overlays_dir,
+                    max_parallel=max_parallel,
+                    tick=tick,
+                    config=config,
                 )
-
-            tick_result = tick_run(
-                paths=paths,
-                mode=mode,
-                actionable_work_found=actionable_work_found,
-                idle_ticks_to_end=idle_ticks_to_end,
-                manual_ttl=manual_ttl,
-                beads_attempted_delta=beads_attempted_total,
-                now=datetime.now().astimezone(),
-                run_lock=lock,
-            )
-            if tick_result.ended and tick_result.run_id is not None:
-                try:
-                    write_final_review(paths, run_id=tick_result.run_id, ai_settings=ai_settings)
-                    if final_review_codex_review:
-                        run_review_only_codex_pass(
-                            paths,
-                            run_id=tick_result.run_id,
-                            ai_settings=ai_settings,
-                            repo_config_path=repo_config_path,
-                        )
-                except RunClosureReviewError as e:
-                    raise OrchestratorCycleError(str(e)) from e
-            if (
-                tick_result.state is not None
-                and review_every_beads is not None
-                and tick_result.state.review_due(review_every_beads=review_every_beads)
-            ):
-                _append_run_log(
-                    paths,
-                    run_id=tick_result.state.run_id,
-                    message="review_cadence status=starting",
-                )
-                try:
-                    run_review_only_codex_pass(
-                        paths,
-                        run_id=tick_result.state.run_id,
-                        ai_settings=ai_settings,
-                        repo_config_path=repo_config_path,
-                        log_stem="cadence_codex_review",
-                        log_suffix=f"tick{tick_result.state.tick_count}",
-                        prompt_label="cadence",
-                    )
-                    record_review(
+                actionable_work_found = any(r.beads_attempted > 0 for r in repo_results)
+                beads_attempted_total = sum(r.beads_attempted for r in repo_results)
+                if (
+                    mode == "manual"
+                    and not actionable_work_found
+                    and ensure_result.run_id is not None
+                ):
+                    _attempt_beads_maintenance(
                         paths=paths,
-                        run_id=tick_result.state.run_id,
-                        now=datetime.now().astimezone(),
-                        run_lock=lock,
+                        run_id=ensure_result.run_id,
+                        repos=repos,
                     )
-                except RunClosureReviewError as e:
+
+                tick_result = tick_run(
+                    paths=paths,
+                    mode=mode,
+                    actionable_work_found=actionable_work_found,
+                    idle_ticks_to_end=idle_ticks_to_end,
+                    manual_ttl=manual_ttl,
+                    beads_attempted_delta=beads_attempted_total,
+                    now=datetime.now().astimezone(),
+                    run_lock=lock,
+                )
+                if tick_result.ended and tick_result.run_id is not None:
+                    try:
+                        write_final_review(paths, run_id=tick_result.run_id, ai_settings=ai_settings)
+                        if final_review_codex_review:
+                            run_review_only_codex_pass(
+                                paths,
+                                run_id=tick_result.run_id,
+                                ai_settings=ai_settings,
+                                repo_config_path=repo_config_path,
+                            )
+                    except RunClosureReviewError as e:
+                        raise OrchestratorCycleError(str(e)) from e
+                if (
+                    tick_result.state is not None
+                    and review_every_beads is not None
+                    and tick_result.state.review_due(review_every_beads=review_every_beads)
+                ):
                     _append_run_log(
                         paths,
                         run_id=tick_result.state.run_id,
-                        message=f"review_cadence status=error error={e}",
+                        message="review_cadence status=starting",
                     )
-                    raise OrchestratorCycleError(str(e)) from e
+                    try:
+                        run_review_only_codex_pass(
+                            paths,
+                            run_id=tick_result.state.run_id,
+                            ai_settings=ai_settings,
+                            repo_config_path=repo_config_path,
+                            log_stem="cadence_codex_review",
+                            log_suffix=f"tick{tick_result.state.tick_count}",
+                            prompt_label="cadence",
+                        )
+                        record_review(
+                            paths=paths,
+                            run_id=tick_result.state.run_id,
+                            now=datetime.now().astimezone(),
+                            run_lock=lock,
+                        )
+                    except RunClosureReviewError as e:
+                        _append_run_log(
+                            paths,
+                            run_id=tick_result.state.run_id,
+                            message=f"review_cadence status=error error={e}",
+                        )
+                        raise OrchestratorCycleError(str(e)) from e
 
-            return OrchestratorCycleResult(
-                ensure_result=ensure_result,
-                tick_result=tick_result,
-                repo_results=repo_results,
-            )
+                return OrchestratorCycleResult(
+                    ensure_result=ensure_result,
+                    tick_result=tick_result,
+                    repo_results=repo_results,
+                )
+            finally:
+                try:
+                    paths.cycle_in_progress_path.unlink()
+                except FileNotFoundError:
+                    pass
     except RunLockError as e:
         raise OrchestratorCycleError(str(e)) from e
     except RepoExecutionError as e:

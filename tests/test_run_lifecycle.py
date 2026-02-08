@@ -151,8 +151,9 @@ def test_ensure_active_run_recovers_orphaned_current_run(tmp_path: Path) -> None
     initial = tick_run(paths=paths, mode="manual", now=t0, idle_ticks_to_end=10)
     assert initial.run_id is not None
     dead_pid = _find_dead_pid()
-    paths.run_lock_path.write_text(
-        json.dumps({"pid": dead_pid, "locked_at": t0.isoformat()}) + "\n",
+    paths.cycle_in_progress_path.write_text(
+        json.dumps({"pid": dead_pid, "run_id": initial.run_id, "started_at": t0.isoformat()})
+        + "\n",
         encoding="utf-8",
     )
 
@@ -163,6 +164,7 @@ def test_ensure_active_run_recovers_orphaned_current_run(tmp_path: Path) -> None
 
     run_end = _read_json(paths.run_end_path(initial.run_id))
     assert run_end["reason"] == "orphaned_owner_dead"
+    assert not paths.cycle_in_progress_path.exists()
 
 
 def test_tick_run_recovers_orphaned_current_run(tmp_path: Path) -> None:
@@ -173,8 +175,9 @@ def test_tick_run_recovers_orphaned_current_run(tmp_path: Path) -> None:
     initial = tick_run(paths=paths, mode="manual", now=t0, idle_ticks_to_end=10)
     assert initial.run_id is not None
     dead_pid = _find_dead_pid()
-    paths.run_lock_path.write_text(
-        json.dumps({"pid": dead_pid, "locked_at": t0.isoformat()}) + "\n",
+    paths.cycle_in_progress_path.write_text(
+        json.dumps({"pid": dead_pid, "run_id": initial.run_id, "started_at": t0.isoformat()})
+        + "\n",
         encoding="utf-8",
     )
 
@@ -185,9 +188,33 @@ def test_tick_run_recovers_orphaned_current_run(tmp_path: Path) -> None:
 
     run_end = _read_json(paths.run_end_path(initial.run_id))
     assert run_end["reason"] == "orphaned_owner_dead"
+    assert not paths.cycle_in_progress_path.exists()
 
 
 def test_recover_orphaned_current_run_marks_end_and_clears_current(tmp_path: Path) -> None:
+    paths = OrchestratorPaths(cache_dir=tmp_path)
+    t0 = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(minutes=5)
+
+    initial = tick_run(paths=paths, mode="manual", now=t0, idle_ticks_to_end=10)
+    assert initial.run_id is not None
+    dead_pid = _find_dead_pid()
+    paths.cycle_in_progress_path.write_text(
+        json.dumps({"pid": dead_pid, "run_id": initial.run_id, "started_at": t0.isoformat()})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    recovered_run_id = recover_orphaned_current_run(paths=paths, now=t1)
+    assert recovered_run_id == initial.run_id
+    assert not paths.current_run_path.exists()
+
+    run_end = _read_json(paths.run_end_path(initial.run_id))
+    assert run_end["reason"] == "orphaned_owner_dead"
+    assert not paths.cycle_in_progress_path.exists()
+
+
+def test_orphan_recovery_does_not_end_run_without_cycle_marker(tmp_path: Path) -> None:
     paths = OrchestratorPaths(cache_dir=tmp_path)
     t0 = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     t1 = t0 + timedelta(minutes=5)
@@ -200,9 +227,6 @@ def test_recover_orphaned_current_run_marks_end_and_clears_current(tmp_path: Pat
         encoding="utf-8",
     )
 
-    recovered_run_id = recover_orphaned_current_run(paths=paths, now=t1)
-    assert recovered_run_id == initial.run_id
-    assert not paths.current_run_path.exists()
-
-    run_end = _read_json(paths.run_end_path(initial.run_id))
-    assert run_end["reason"] == "orphaned_owner_dead"
+    recovered = ensure_active_run(paths=paths, mode="manual", now=t1, idle_ticks_to_end=10)
+    assert recovered.run_id == initial.run_id
+    assert recovered.started_new is False
