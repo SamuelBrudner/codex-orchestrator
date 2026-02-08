@@ -91,6 +91,23 @@ _TIMEOUT_SUMMARY_MARKER = "[orchestrator] Timeout summary"
 _DIFFCAP_SUMMARY_MARKER = "[orchestrator] Diff cap summary"
 _DECOMPOSE_MARKER = "[orchestrator] Decomposed into follow-up beads"
 _FOLLOWUP_MAX_CHANGED_PATHS = 8
+_ENV_PREFLIGHT_TORCH_NUMPY_SCRIPT = "\n".join(
+    [
+        "import importlib.util as _u",
+        "import sys as _s",
+        "_ts = _u.find_spec('torch')",
+        "_ns = _u.find_spec('numpy')",
+        "if _ts is None or _ns is None:",
+        "    raise SystemExit(0)",
+        "import numpy as _np",
+        "import torch as _torch",
+        "_torch.from_numpy(_np.zeros((1,), dtype=_np.float32))",
+    ]
+)
+_ENV_PREFLIGHT_TORCH_NUMPY_COMMAND = (
+    "python -c " + shlex.quote(_ENV_PREFLIGHT_TORCH_NUMPY_SCRIPT)
+)
+_ENV_PREFLIGHT_NAME = "torch_numpy_bridge"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +230,16 @@ def _require_validation_allowlist(commands: Sequence[str]) -> None:
         )
 
 
+def _summarize_preflight_output(result: ValidationResult, *, limit: int = 1200) -> str:
+    text = (result.stderr or "").strip() or (result.stdout or "").strip()
+    if not text:
+        return f"exit={result.exit_code}"
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return text[:limit] + f"\n...<truncated {omitted} chars>"
+
+
 def _format_codex_prompt(
     *,
     run_id: str,
@@ -247,19 +274,28 @@ def _format_codex_prompt(
             "the focus describes a domain or goal, not exact keywords.",
         ])
 
-    lines.extend([
+    constraint_lines = [
         "",
         "Constraints:",
         f"- Time budget: {contract.time_budget_minutes} minutes",
         f"- Conda env: {env_label}",
-        f"- Allowed roots: {allowed_roots}",
-        f"- Deny roots: {deny_roots}",
-        "- Do not edit files outside allowed roots or under deny roots.",
-        "- Do not create git commits; the orchestrator will commit.",
-        "",
-        "Validation commands (must pass to close):",
-        validation,
-    ])
+    ]
+    if contract.env:
+        constraint_lines.append(
+            f"- Run diagnostics in this env (e.g., `conda run -n {env_label} pytest -q`)."
+        )
+    constraint_lines.extend(
+        [
+            f"- Allowed roots: {allowed_roots}",
+            f"- Deny roots: {deny_roots}",
+            "- Do not edit files outside allowed roots or under deny roots.",
+            "- Do not create git commits; the orchestrator will commit.",
+            "",
+            "Validation commands (must pass to close):",
+            validation,
+        ]
+    )
+    lines.extend(constraint_lines)
     if validation_context:
         lines.extend([
             "",
@@ -1559,6 +1595,7 @@ def execute_repo_tick(
                     + config.codex_timeout_padding
                 )
                 attempt = 0
+                env_preflight_checked = False
 
                 while True:
                     attempt += 1
@@ -2049,6 +2086,7 @@ def execute_repo_tick(
                                 maybe_write_repo_report(branch=run_branch)
                                 break
                             last_dependency_signature = dep_signature
+                            env_preflight_checked = False
 
                     try:
                         _require_validation_allowlist(item.contract.validation_commands)
@@ -2128,6 +2166,93 @@ def execute_repo_tick(
                         cmd for cmd, r in validation_results.items() if r.exit_code != 0
                     )
                     if failed_commands:
+                        preflight_result: ValidationResult | None = None
+                        if item.contract.env and not env_preflight_checked:
+                            env_preflight_checked = True
+                            preflight_timeout_seconds = max(
+                                1.0, min(validation_timeout_seconds, 120.0)
+                            )
+                            preflight_results = run_validation_commands(
+                                (_ENV_PREFLIGHT_TORCH_NUMPY_COMMAND,),
+                                cwd=repo_policy.path,
+                                env=item.contract.env,
+                                timeout_seconds=preflight_timeout_seconds,
+                            )
+                            preflight_result = preflight_results.get(
+                                _ENV_PREFLIGHT_TORCH_NUMPY_COMMAND
+                            )
+                            if preflight_result is not None:
+                                validation_status_by_command[f"env_preflight:{_ENV_PREFLIGHT_NAME}"] = _validation_status(preflight_result.exit_code)
+                                _append_log(
+                                    stdout_log_path,
+                                    f"{_now().isoformat()} validation_env_preflight_stdout bead_id={item.bead_id} "
+                                    f"attempt={attempt} env={item.contract.env} check={_ENV_PREFLIGHT_NAME} "
+                                    f"exit={preflight_result.exit_code}",
+                                )
+                                if preflight_result.stdout.strip():
+                                    _append_log(stdout_log_path, preflight_result.stdout)
+                                _append_log(
+                                    stderr_log_path,
+                                    f"{_now().isoformat()} validation_env_preflight_stderr bead_id={item.bead_id} "
+                                    f"attempt={attempt} env={item.contract.env} check={_ENV_PREFLIGHT_NAME} "
+                                    f"exit={preflight_result.exit_code}",
+                                )
+                                if preflight_result.stderr.strip():
+                                    _append_log(stderr_log_path, preflight_result.stderr)
+                                emit(
+                                    "validation_env_preflight_end",
+                                    bead_id=item.bead_id,
+                                    attempt=attempt,
+                                    env=item.contract.env,
+                                    check=_ENV_PREFLIGHT_NAME,
+                                    exit_code=preflight_result.exit_code,
+                                )
+                            if preflight_result is not None and preflight_result.exit_code != 0:
+                                preflight_summary = _summarize_preflight_output(preflight_result)
+                                detail = "Validation env preflight failed."
+                                bd_update(
+                                    repo_root=repo_policy.path,
+                                    issue_id=item.bead_id,
+                                    notes=(issue.notes + "\n" if issue.notes else "")
+                                    + "[orchestrator] Validation env preflight failed in "
+                                    + f"conda env {item.contract.env!r}; cannot proceed with retries.\n"
+                                    + preflight_summary,
+                                )
+                                bead_results.append(
+                                    BeadResult(
+                                        bead_id=item.bead_id,
+                                        title=item.title,
+                                        outcome="failed",
+                                        detail=detail,
+                                    )
+                                )
+                                bead_audits.append(
+                                    {
+                                        "bead_id": item.bead_id,
+                                        "title": item.title,
+                                        "outcome": "failed",
+                                        "detail": detail,
+                                        "changed_paths": list(changed_paths),
+                                        "validation": {
+                                            cmd: _validation_status(r.exit_code)
+                                            for cmd, r in validation_results.items()
+                                        },
+                                        "validation_env_preflight": {
+                                            "check": _ENV_PREFLIGHT_NAME,
+                                            "status": _validation_status(
+                                                preflight_result.exit_code
+                                            ),
+                                        },
+                                    }
+                                )
+                                repo_failures.append(
+                                    f"{item.bead_id}: validation env preflight failed "
+                                    f"({item.contract.env}, {_ENV_PREFLIGHT_NAME})."
+                                )
+                                stop_reason = "blocked"
+                                maybe_write_repo_report(branch=run_branch)
+                                break
+
                         if _can_retry_validation(
                             tick=tick,
                             now=_now(),

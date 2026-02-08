@@ -437,3 +437,85 @@ def test_unexpected_codex_exception_fails_bead_without_crashing(
     failed_events = [event for event in events if event.get("type") == "codex_failed"]
     assert failed_events
     assert "RuntimeError: boom" in str(failed_events[-1].get("error"))
+
+
+def test_validation_env_preflight_blocks_retry_loop_on_unhealthy_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_fake_tools(tmp_path, monkeypatch)
+    repo_root, policy = _setup_repo(tmp_path)
+    _write_fake_issues(repo_root, ["bd-1"])
+
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "20250101-000000-deadbeef"
+    _write_deck(paths, run_id=run_id, bead_ids=["bd-1"])
+
+    def _fake_validation(
+        commands: tuple[str, ...] | list[str],
+        *,
+        cwd: Path,
+        env: str | None = None,
+        timeout_seconds: float = 900.0,
+        output_limit_chars: int = 20_000,
+    ) -> dict[str, ValidationResult]:
+        del cwd, env, timeout_seconds, output_limit_chars
+        now = datetime.now().astimezone()
+        out: dict[str, ValidationResult] = {}
+        for command in commands:
+            if "import importlib.util as _u" in command:
+                out[command] = ValidationResult(
+                    command=command,
+                    exit_code=1,
+                    started_at=now,
+                    finished_at=now,
+                    stdout="",
+                    stderr="RuntimeError: Numpy is not available",
+                )
+            else:
+                out[command] = ValidationResult(
+                    command=command,
+                    exit_code=1,
+                    started_at=now,
+                    finished_at=now,
+                    stdout="",
+                    stderr="validation failed",
+                )
+        return out
+
+    monkeypatch.setattr(repo_execution, "run_validation_commands", _fake_validation)
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=10))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=10),
+            min_minutes_to_start_new_bead=0,
+            max_beads_per_tick=1,
+            diff_caps=DiffCaps(max_files_changed=50, max_lines_added=500),
+        ),
+    )
+
+    assert result.skipped is False
+    assert result.stop_reason == "blocked"
+    assert result.beads_attempted == 1
+    assert len(result.bead_results) == 1
+    assert result.bead_results[0].detail == "Validation env preflight failed."
+
+    events_path = paths.repo_events_path(run_id, policy.repo_id)
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    codex_starts = [event for event in events if event.get("type") == "codex_start"]
+    assert len(codex_starts) == 1
+    preflight_events = [
+        event for event in events if event.get("type") == "validation_env_preflight_end"
+    ]
+    assert preflight_events
+    assert preflight_events[-1].get("exit_code") == 1
