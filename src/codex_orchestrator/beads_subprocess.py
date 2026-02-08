@@ -39,6 +39,7 @@ def _run_bd(
     *,
     cwd: Path,
     timeout_seconds: float = 60.0,
+    ok_exit_codes: Sequence[int] = (0,),
 ) -> str:
     try:
         completed = subprocess.run(
@@ -54,7 +55,7 @@ def _run_bd(
     except subprocess.TimeoutExpired as e:
         raise BdCliError(f"bd {' '.join(args)} timed out after {timeout_seconds:.0f}s.") from e
 
-    if completed.returncode != 0:
+    if completed.returncode not in set(int(code) for code in ok_exit_codes):
         stderr = (completed.stderr or "").strip()
         stdout = (completed.stdout or "").strip()
         details = stderr or stdout or "<no output>"
@@ -188,7 +189,8 @@ def bd_ready(*, repo_root: Path) -> list[ReadyBead]:
 
 
 def bd_doctor(*, repo_root: Path) -> dict[str, Any]:
-    data = _parse_json_output(_run_bd(["doctor", "--json"], cwd=repo_root))
+    # `bd doctor --json` exits with 1 when `overall_ok=false`, but still emits valid JSON.
+    data = _parse_json_output(_run_bd(["doctor", "--json"], cwd=repo_root, ok_exit_codes=(0, 1)))
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -197,11 +199,16 @@ def bd_doctor(*, repo_root: Path) -> dict[str, Any]:
 
 
 def bd_sync(*, repo_root: Path) -> dict[str, Any]:
-    data = _parse_json_output(_run_bd(["sync", "--json"], cwd=repo_root))
+    # Some bd versions accept `--json` but still emit human-readable progress text on stdout,
+    # which is not parseable JSON. Treat non-JSON output as a successful no-op and return {}.
+    try:
+        data = _parse_json_output(_run_bd(["sync", "--json"], cwd=repo_root))
+    except BdCliError:
+        return {}
     if data is None:
         return {}
     if not isinstance(data, dict):
-        raise BdCliError(f"bd sync --json: expected an object, got {type(data).__name__}")
+        return {}
     return data
 
 

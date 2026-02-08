@@ -62,12 +62,32 @@ def _attempt_beads_maintenance(
 ) -> None:
     for repo in repos:
         try:
-            bd_doctor(repo_root=repo.path)
-            _append_run_log(
-                paths,
-                run_id=run_id,
-                message=f"beads_doctor repo_id={repo.repo_id} status=ok",
-            )
+            doctor = bd_doctor(repo_root=repo.path)
+            overall_ok = doctor.get("overall_ok")
+            checks = doctor.get("checks")
+            failed_checks = 0
+            if isinstance(checks, list):
+                for item in checks:
+                    if not isinstance(item, dict):
+                        continue
+                    status = item.get("status")
+                    if isinstance(status, str) and status != "ok":
+                        failed_checks += 1
+            if overall_ok is False:
+                _append_run_log(
+                    paths,
+                    run_id=run_id,
+                    message=(
+                        f"beads_doctor repo_id={repo.repo_id} status=warn overall_ok=false "
+                        f"failed_checks={failed_checks}"
+                    ),
+                )
+            else:
+                _append_run_log(
+                    paths,
+                    run_id=run_id,
+                    message=f"beads_doctor repo_id={repo.repo_id} status=ok",
+                )
         except BdCliError as e:
             _append_run_log(
                 paths,

@@ -30,10 +30,11 @@ def test_bd_init_runs_when_db_missing(tmp_path: Path, monkeypatch) -> None:
 
     calls: dict[str, object] = {}
 
-    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0) -> str:
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
         calls["args"] = args
         calls["cwd"] = cwd
         calls["timeout_seconds"] = timeout_seconds
+        calls["ok_exit_codes"] = ok_exit_codes
         return ""
 
     monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
@@ -48,7 +49,7 @@ def test_bd_update_accepts_single_item_list(tmp_path: Path, monkeypatch) -> None
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0) -> str:
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
         assert args[:2] == ["update", "bd-1"]
         assert cwd == repo_root
         return (
@@ -62,3 +63,36 @@ def test_bd_update_accepts_single_item_list(tmp_path: Path, monkeypatch) -> None
 
     assert issue.issue_id == "bd-1"
     assert issue.title == "Test bead"
+
+
+def test_bd_doctor_allows_exit_one_json(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        assert args == ["doctor", "--json"]
+        assert cwd == repo_root
+        assert tuple(ok_exit_codes) == (0, 1)
+        return '{"overall_ok": false, "checks": []}'
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    out = beads_subprocess.bd_doctor(repo_root=repo_root)
+
+    assert out["overall_ok"] is False
+
+
+def test_bd_sync_ignores_non_json_output(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        assert args == ["sync", "--json"]
+        assert cwd == repo_root
+        return "Exporting beads to JSONL...\n✓ Exported 0 issues\n"
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    out = beads_subprocess.bd_sync(repo_root=repo_root)
+
+    assert out == {}
