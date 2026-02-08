@@ -1632,19 +1632,25 @@ def execute_repo_tick(
                             extra_args=codex_cli_args_for_settings(config.ai_settings),
                             output_limit_chars=config.codex_output_limit_chars,
                         )
-                    except CodexCliError as e:
+                    except Exception as e:
+                        if isinstance(e, CodexCliError):
+                            failure_detail = f"codex CLI failed: {e}"
+                            failure_error = str(e)
+                        else:
+                            failure_detail = f"codex invocation crashed: {type(e).__name__}: {e}"
+                            failure_error = f"{type(e).__name__}: {e}"
                         bd_update(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
                             notes=(issue.notes + "\n" if issue.notes else "")
-                            + f"[orchestrator] codex invocation failed: {e}",
+                            + f"[orchestrator] codex invocation failed: {failure_error}",
                         )
                         bead_results.append(
                             BeadResult(
                                 bead_id=item.bead_id,
                                 title=item.title,
                                 outcome="failed",
-                                detail=f"codex CLI failed: {e}",
+                                detail=failure_detail,
                             )
                         )
                         bead_audits.append(
@@ -1652,15 +1658,15 @@ def execute_repo_tick(
                                 "bead_id": item.bead_id,
                                 "title": item.title,
                                 "outcome": "failed",
-                                "detail": f"codex CLI failed: {e}",
+                                "detail": failure_detail,
                             }
                         )
-                        repo_failures.append(f"codex failed for {item.bead_id}: {e}")
+                        repo_failures.append(f"codex failed for {item.bead_id}: {failure_error}")
                         emit(
                             "codex_failed",
                             bead_id=item.bead_id,
                             attempt=attempt,
-                            error=str(e),
+                            error=failure_error,
                             argv=list(codex_argv),
                         )
                         stop_reason = "error"

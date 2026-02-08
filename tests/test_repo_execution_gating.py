@@ -384,3 +384,56 @@ def test_validation_timeout_is_capped_by_remaining_budget(
     assert result.beads_attempted == 1
     assert "timeout_seconds" in captured
     assert captured["timeout_seconds"] <= 3.0
+
+
+def test_unexpected_codex_exception_fails_bead_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_fake_tools(tmp_path, monkeypatch)
+    repo_root, policy = _setup_repo(tmp_path)
+    _write_fake_issues(repo_root, ["bd-1"])
+
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "20250101-000000-deadbeef"
+    _write_deck(paths, run_id=run_id, bead_ids=["bd-1"])
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(repo_execution, "codex_exec_full_auto", _boom)
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=10))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=10),
+            min_minutes_to_start_new_bead=0,
+            max_beads_per_tick=1,
+            diff_caps=DiffCaps(max_files_changed=50, max_lines_added=500),
+        ),
+    )
+
+    assert result.skipped is False
+    assert result.stop_reason == "error"
+    assert result.beads_attempted == 1
+    assert result.beads_closed == 0
+    assert len(result.bead_results) == 1
+    assert result.bead_results[0].outcome == "failed"
+    assert "codex invocation crashed: RuntimeError: boom" in result.bead_results[0].detail
+
+    events_path = paths.repo_events_path(run_id, policy.repo_id)
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(event.get("type") == "codex_start" for event in events)
+    failed_events = [event for event in events if event.get("type") == "codex_failed"]
+    assert failed_events
+    assert "RuntimeError: boom" in str(failed_events[-1].get("error"))
