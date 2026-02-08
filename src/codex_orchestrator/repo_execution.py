@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import threading
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -91,6 +92,7 @@ _TIMEOUT_SUMMARY_MARKER = "[orchestrator] Timeout summary"
 _DIFFCAP_SUMMARY_MARKER = "[orchestrator] Diff cap summary"
 _DECOMPOSE_MARKER = "[orchestrator] Decomposed into follow-up beads"
 _FOLLOWUP_MAX_CHANGED_PATHS = 8
+_CODEX_HEARTBEAT_INTERVAL_SECONDS = 30.0
 _ENV_PREFLIGHT_TORCH_NUMPY_SCRIPT = "\n".join(
     [
         "import importlib.util as _u",
@@ -1172,6 +1174,7 @@ def execute_repo_tick(
 
     planning_audit_json_path = paths.repo_planning_audit_json_path(run_id, repo_policy.repo_id)
     planning_audit_md_path = paths.repo_planning_audit_md_path(run_id, repo_policy.repo_id)
+    events_lock = threading.Lock()
 
     def emit(event_type: str, **fields: Any) -> None:
         ts = _now().isoformat()
@@ -1182,7 +1185,8 @@ def execute_repo_tick(
             "repo_id": repo_policy.repo_id,
             **fields,
         }
-        append_jsonl(events_path, payload)
+        with events_lock:
+            append_jsonl(events_path, payload)
 
     def maybe_write_repo_report(*, branch: str | None) -> Path | None:
         nonlocal run_report_path
@@ -1643,6 +1647,9 @@ def execute_repo_tick(
                             ).total_seconds(),
                         ),
                     )
+                    codex_pid: int | None = None
+                    heartbeat_stop: threading.Event | None = None
+                    heartbeat_thread: threading.Thread | None = None
                     _append_log(
                         log_path,
                         f"{_now().isoformat()} codex_start bead_id={item.bead_id} "
@@ -1661,6 +1668,65 @@ def execute_repo_tick(
                         timeout_seconds=timeout_seconds,
                         argv=list(codex_argv),
                     )
+
+                    def _on_codex_start(
+                        pid: int, argv: tuple[str, ...], started_at: datetime
+                    ) -> None:
+                        nonlocal codex_pid, heartbeat_stop, heartbeat_thread
+                        codex_pid = pid
+                        _append_log(
+                            log_path,
+                            f"{_now().isoformat()} codex_spawn bead_id={item.bead_id} "
+                            f"attempt={attempt} pid={pid}",
+                        )
+                        emit(
+                            "codex_spawn",
+                            bead_id=item.bead_id,
+                            attempt=attempt,
+                            pid=pid,
+                            started_at=started_at.isoformat(),
+                            argv=list(argv),
+                        )
+
+                        stop_event = threading.Event()
+                        heartbeat_stop = stop_event
+
+                        def _heartbeat() -> None:
+                            while not stop_event.wait(_CODEX_HEARTBEAT_INTERVAL_SECONDS):
+                                try:
+                                    hb_now = _now()
+                                    elapsed = (hb_now - started_at).total_seconds()
+                                    remaining_seconds = max(0.0, timeout_seconds - elapsed)
+                                    _append_log(
+                                        log_path,
+                                        f"{hb_now.isoformat()} codex_heartbeat bead_id={item.bead_id} "
+                                        f"attempt={attempt} pid={pid} elapsed={elapsed:.0f}s "
+                                        f"remaining={remaining_seconds:.0f}s",
+                                    )
+                                    emit(
+                                        "codex_heartbeat",
+                                        bead_id=item.bead_id,
+                                        attempt=attempt,
+                                        pid=pid,
+                                        elapsed_seconds=elapsed,
+                                        remaining_seconds=remaining_seconds,
+                                        timeout_seconds=timeout_seconds,
+                                    )
+                                except Exception as hb_err:
+                                    _append_log(
+                                        log_path,
+                                        f"{_now().isoformat()} codex_heartbeat_error bead_id={item.bead_id} "
+                                        f"attempt={attempt} pid={pid} error={type(hb_err).__name__}: {hb_err}",
+                                    )
+                                    break
+
+                        t = threading.Thread(
+                            target=_heartbeat,
+                            name=f"codex-heartbeat-{repo_policy.repo_id}-{item.bead_id}-{attempt}",
+                            daemon=True,
+                        )
+                        heartbeat_thread = t
+                        t.start()
                     try:
                         codex_invocation = codex_exec_full_auto(
                             prompt=codex_prompt,
@@ -1668,6 +1734,7 @@ def execute_repo_tick(
                             timeout_seconds=timeout_seconds,
                             extra_args=codex_cli_args_for_settings(config.ai_settings),
                             output_limit_chars=config.codex_output_limit_chars,
+                            on_start=_on_codex_start,
                         )
                     except Exception as e:
                         if isinstance(e, CodexCliError):
@@ -1703,6 +1770,7 @@ def execute_repo_tick(
                             "codex_failed",
                             bead_id=item.bead_id,
                             attempt=attempt,
+                            pid=codex_pid,
                             error=failure_error,
                             argv=list(codex_argv),
                         )
@@ -1724,16 +1792,22 @@ def execute_repo_tick(
                             except GitError as commit_err:
                                 repo_failures.append(f"Failed to commit run report: {commit_err}")
                         break
+                    finally:
+                        if heartbeat_stop is not None:
+                            heartbeat_stop.set()
+                        if heartbeat_thread is not None:
+                            heartbeat_thread.join(timeout=2.0)
 
                     _append_log(
                         log_path,
                         f"{_now().isoformat()} codex_end bead_id={item.bead_id} "
-                        f"attempt={attempt} exit={codex_invocation.exit_code}",
+                        f"attempt={attempt} pid={codex_invocation.pid} exit={codex_invocation.exit_code}",
                     )
                     emit(
                         "codex_end",
                         bead_id=item.bead_id,
                         attempt=attempt,
+                        pid=codex_invocation.pid,
                         exit_code=codex_invocation.exit_code,
                         started_at=codex_invocation.started_at.isoformat(),
                         finished_at=codex_invocation.finished_at.isoformat(),

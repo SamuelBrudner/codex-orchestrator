@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,16 @@ from codex_orchestrator.run_closure_review import run_review_only_codex_pass, wr
 from codex_orchestrator.run_lifecycle import RunLifecycleError, end_current_run
 from codex_orchestrator.run_lock import RunLock
 from codex_orchestrator.run_state import CurrentRunState
+
+
+def _configure_stdio() -> None:
+    # When stdout is redirected (nohup, cron, etc.), Python may fully buffer prints.
+    # Line buffering keeps roadtrip progress visible even if the process is killed.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except Exception:
+            continue
 
 
 def _parse_until(value: str) -> datetime:
@@ -158,6 +169,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdio()
     args = _build_parser().parse_args(argv)
     settings = _load_enforced_ai_settings()
 
@@ -194,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_id: str | None = None
     next_cycle_at = started_at
-    print(f"codex-roadtrip: starting, will run until {end_at.isoformat()}")
+    print(f"codex-roadtrip: starting, will run until {end_at.isoformat()}", flush=True)
     while True:
         now = datetime.now().astimezone()
         if now >= end_at:
@@ -235,23 +247,26 @@ def main(argv: list[str] | None = None) -> int:
         ensure = cycle_result.ensure_result
         if ensure.run_id is not None:
             run_id = ensure.run_id
-            print(f"RUN_ID={run_id}")
+            print(f"RUN_ID={run_id}", flush=True)
 
         if ensure.ended:
-            print(f"codex-roadtrip: run ended, reason={ensure.end_reason}")
+            print(f"codex-roadtrip: run ended, reason={ensure.end_reason}", flush=True)
             break
 
         tick = cycle_result.tick_result
         for repo_result in cycle_result.repo_results:
             beads_done = len([b for b in repo_result.bead_results if b.outcome == "completed"])
             beads_failed = len([b for b in repo_result.bead_results if b.outcome == "failed"])
-            print(f"  repo={repo_result.repo_id} beads_completed={beads_done} beads_failed={beads_failed}")
+            print(
+                f"  repo={repo_result.repo_id} beads_completed={beads_done} beads_failed={beads_failed}",
+                flush=True,
+            )
         if tick is not None and tick.ended:
-            print(f"codex-roadtrip: tick ended run, reason={tick.end_reason}")
+            print(f"codex-roadtrip: tick ended run, reason={tick.end_reason}", flush=True)
             break
 
         next_cycle_at = now + timedelta(minutes=cadence_minutes)
-        print(f"codex-roadtrip: next tick at {next_cycle_at.strftime('%H:%M:%S')}")
+        print(f"codex-roadtrip: next tick at {next_cycle_at.strftime('%H:%M:%S')}", flush=True)
 
     if run_id is not None:
         try:
