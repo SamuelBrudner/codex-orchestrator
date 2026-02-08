@@ -83,6 +83,55 @@ def _load_current_run_state(*, path: Path, now: datetime) -> CurrentRunState | N
     return state
 
 
+def _read_lock_pid(lock_path: Path) -> int | None:
+    try:
+        payload = _read_json(lock_path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_pid = payload.get("pid")
+    if isinstance(raw_pid, int) and raw_pid > 0:
+        return raw_pid
+    if isinstance(raw_pid, str):
+        text = raw_pid.strip()
+        if text.isdigit():
+            value = int(text)
+            if value > 0:
+                return value
+    return None
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _recover_orphaned_current_run(paths: OrchestratorPaths, *, now: datetime) -> None:
+    state = _load_current_run_state(path=paths.current_run_path, now=now)
+    if state is None:
+        return
+    owner_pid = _read_lock_pid(paths.run_lock_path)
+    if owner_pid is None:
+        return
+    if _pid_is_alive(owner_pid):
+        return
+    reason = "orphaned_owner_dead"
+    _append_run_log(
+        paths,
+        run_id=state.run_id,
+        message=f"{now.isoformat()} end_run reason={reason} owner_pid={owner_pid}",
+    )
+    _end_run(paths, state=state, now=now, reason=reason)
+
+
 def _ensure_run_artifacts(paths: OrchestratorPaths, *, state: CurrentRunState) -> None:
     run_dir = paths.run_dir(state.run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -307,6 +356,7 @@ def tick_run(
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        _recover_orphaned_current_run(paths, now=now)
         if run_lock is not None:
             _require_held_run_lock(paths, run_lock=run_lock)
             return _tick_run_locked(
@@ -470,6 +520,7 @@ def ensure_active_run(
         )
 
     try:
+        _recover_orphaned_current_run(paths, now=now)
         if run_lock is not None:
             _require_held_run_lock(paths, run_lock=run_lock)
             return _ensure_locked()
