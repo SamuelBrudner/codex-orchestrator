@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from codex_orchestrator.agent_guidance import ensure_commit_message_guidance_issue
 from codex_orchestrator.audit_trail import write_json_atomic, write_text_atomic
-from codex_orchestrator.beads_subprocess import bd_init, bd_list_ids, bd_ready
+from codex_orchestrator.beads_subprocess import BdCliError, bd_init, bd_list_ids, bd_ready, bd_show
 from codex_orchestrator.contract_overlays import load_contract_overlay
 from codex_orchestrator.env_bootstrap import bootstrap_repo_env
 from codex_orchestrator.git_subprocess import GitError
@@ -20,6 +21,7 @@ from codex_orchestrator.notebook_refactor_issues import (
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import (
     PlanningResult,
+    ReadyBead,
     RunDeck,
     build_run_deck,
     load_existing_run_deck,
@@ -84,6 +86,36 @@ def _collect_validation_commands(planning: PlanningResult) -> list[str]:
     return commands
 
 
+def _filter_ready_beads_by_live_status(
+    *,
+    repo_root: Path,
+    ready_beads: Sequence[ReadyBead],
+) -> list[ReadyBead]:
+    out: list[ReadyBead] = []
+    for bead in ready_beads:
+        try:
+            issue = bd_show(repo_root=repo_root, issue_id=bead.bead_id)
+        except BdCliError as e:
+            logger.warning(
+                "Skipping live status filter for bead_id=%s due to bd show failure: %s",
+                bead.bead_id,
+                e,
+            )
+            out.append(bead)
+            continue
+
+        if issue.status in {"open", "in_progress"}:
+            out.append(bead)
+            continue
+
+        logger.info(
+            "Dropping bead_id=%s from planning because live status=%s",
+            bead.bead_id,
+            issue.status,
+        )
+    return out
+
+
 def _baseline_env(repo_policy: RepoPolicy, planning: PlanningResult) -> str | None:
     if repo_policy.env is not None and repo_policy.env.strip():
         return repo_policy.env
@@ -123,7 +155,10 @@ def ensure_repo_run_deck(
     bd_init(repo_root=repo_policy.path)
     ensure_commit_message_guidance_issue(repo_root=repo_policy.path)
     known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
-    ready_beads = bd_ready(repo_root=repo_policy.path)
+    ready_beads = _filter_ready_beads_by_live_status(
+        repo_root=repo_policy.path,
+        ready_beads=bd_ready(repo_root=repo_policy.path),
+    )
 
     overlay = load_contract_overlay(
         overlay_path,
@@ -164,7 +199,10 @@ def ensure_repo_run_deck(
         )
         if notebook_refactor.issue_ids:
             known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
-            ready_beads = bd_ready(repo_root=repo_policy.path)
+            ready_beads = _filter_ready_beads_by_live_status(
+                repo_root=repo_policy.path,
+                ready_beads=bd_ready(repo_root=repo_policy.path),
+            )
 
     planning = plan_deck_items(
         repo_policy=repo_policy,

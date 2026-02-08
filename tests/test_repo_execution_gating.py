@@ -519,3 +519,102 @@ def test_validation_env_preflight_blocks_retry_loop_on_unhealthy_env(
     ]
     assert preflight_events
     assert preflight_events[-1].get("exit_code") == 1
+
+
+def test_retry_loop_stops_when_bead_closes_between_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_fake_tools(tmp_path, monkeypatch)
+    repo_root, policy = _setup_repo(tmp_path)
+    _write_fake_issues(repo_root, ["bd-1"])
+
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "20250101-000000-deadbeef"
+    _write_deck(paths, run_id=run_id, bead_ids=["bd-1"])
+
+    validation_calls = {"n": 0}
+
+    def _close_issue(issue_id: str) -> None:
+        issues = json.loads((repo_root / ".fake_beads.json").read_text(encoding="utf-8"))
+        issues[issue_id]["status"] = "closed"
+        (repo_root / ".fake_beads.json").write_text(
+            json.dumps(issues, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _fake_validation(
+        commands: tuple[str, ...] | list[str],
+        *,
+        cwd: Path,
+        env: str | None = None,
+        timeout_seconds: float = 900.0,
+        output_limit_chars: int = 20_000,
+    ) -> dict[str, ValidationResult]:
+        del cwd, env, timeout_seconds, output_limit_chars
+        now = datetime.now().astimezone()
+        out: dict[str, ValidationResult] = {}
+        for command in commands:
+            if command == "pytest -q":
+                validation_calls["n"] += 1
+                if validation_calls["n"] == 1:
+                    _close_issue("bd-1")
+                out[command] = ValidationResult(
+                    command=command,
+                    exit_code=1,
+                    started_at=now,
+                    finished_at=now,
+                    stdout="",
+                    stderr="validation failed",
+                )
+                continue
+            out[command] = ValidationResult(
+                command=command,
+                exit_code=0,
+                started_at=now,
+                finished_at=now,
+                stdout="",
+                stderr="",
+            )
+        return out
+
+    retry_calls = {"n": 0}
+
+    def _can_retry(*, tick: TickBudget, now: datetime, bead_deadline: datetime) -> bool:
+        del tick, now, bead_deadline
+        retry_calls["n"] += 1
+        return retry_calls["n"] == 1
+
+    monkeypatch.setattr(repo_execution, "run_validation_commands", _fake_validation)
+    monkeypatch.setattr(repo_execution, "_can_retry_validation", _can_retry)
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=10))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=10),
+            min_minutes_to_start_new_bead=0,
+            max_beads_per_tick=1,
+            diff_caps=DiffCaps(max_files_changed=50, max_lines_added=500),
+        ),
+    )
+
+    assert result.skipped is False
+    assert result.stop_reason == "completed"
+    assert result.beads_attempted == 1
+    assert result.beads_closed == 0
+    assert len(result.bead_results) == 1
+    assert result.bead_results[0].outcome == "skipped_closed"
+
+    events_path = paths.repo_events_path(run_id, policy.repo_id)
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    codex_starts = [event for event in events if event.get("type") == "codex_start"]
+    assert len(codex_starts) == 1

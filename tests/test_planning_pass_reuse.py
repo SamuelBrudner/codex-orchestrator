@@ -310,6 +310,96 @@ def test_planning_pass_applies_focus_filter_to_run_deck(
     assert "Excluded by focus filter" in result.planning.skipped_beads[0].next_action
 
 
+def test_planning_pass_filters_ready_beads_with_non_open_live_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlay_path = tmp_path / "test_repo.toml"
+    _write_overlay(
+        overlay_path,
+        "\n".join(
+            [
+                "[defaults]",
+                "time_budget_minutes = 45",
+                "allow_env_creation = false",
+                "requires_notebook_execution = false",
+                'validation_commands = ["pytest -q"]',
+                'env = "default_env"',
+                "",
+            ]
+        ),
+    )
+
+    policy = _policy(tmp_path=tmp_path)
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "run-status-filter-1"
+    now = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    import codex_orchestrator.planning_pass as planning_pass
+
+    def _bd_init(*, repo_root: Path) -> None:
+        return None
+
+    def _bd_list_ids(*, repo_root: Path) -> set[str]:
+        return {"bd-open", "bd-in-progress", "bd-closed", "bd-blocked", "bd-canceled"}
+
+    def _bd_ready(*, repo_root: Path) -> list[ReadyBead]:
+        return [
+            ReadyBead(bead_id="bd-open", title="Open bead"),
+            ReadyBead(bead_id="bd-in-progress", title="In progress bead"),
+            ReadyBead(bead_id="bd-closed", title="Closed bead"),
+            ReadyBead(bead_id="bd-blocked", title="Blocked bead"),
+            ReadyBead(bead_id="bd-canceled", title="Canceled bead"),
+        ]
+
+    statuses = {
+        "bd-open": "open",
+        "bd-in-progress": "in_progress",
+        "bd-closed": "closed",
+        "bd-blocked": "blocked",
+        "bd-canceled": "canceled",
+    }
+
+    def _bd_show(*, repo_root: Path, issue_id: str) -> BdIssue:
+        return BdIssue(
+            issue_id=issue_id,
+            title=issue_id,
+            status=statuses[issue_id],
+            notes="",
+            dependencies=(),
+            dependents=(),
+        )
+
+    def _run_validations(
+        commands,
+        *,
+        cwd: Path,
+        env: str | None = None,
+        timeout_seconds: float = 900.0,
+        output_limit_chars: int = 20_000,
+    ) -> dict[str, ValidationResult]:
+        return {
+            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
+            for cmd in commands
+        }
+
+    monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
+    monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
+    monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
+    monkeypatch.setattr(planning_pass, "bd_show", _bd_show)
+    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
+
+    result = ensure_repo_run_deck(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=overlay_path,
+        replan=False,
+        now=now,
+    )
+
+    assert [item.bead_id for item in result.deck.items] == ["bd-open", "bd-in-progress"]
+
+
 def test_planning_pass_fails_without_writing_deck_when_audit_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

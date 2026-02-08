@@ -744,6 +744,16 @@ def _validation_status(exit_code: int) -> str:
     return "ok" if exit_code == 0 else f"exit={exit_code}"
 
 
+def _bead_skip_for_issue_status(status: str) -> tuple[BeadOutcome, str] | None:
+    if status == "closed":
+        return ("skipped_closed", "Issue already closed; skipping per conservative policy.")
+    if status == "blocked":
+        return ("skipped_blocked", "Issue is blocked; skipping per conservative policy.")
+    if status not in {"open", "in_progress"}:
+        return ("skipped_not_open", f"Unsupported status={status!r}; skipping.")
+    return None
+
+
 def _infer_next_action(
     *,
     skipped: bool,
@@ -1520,57 +1530,23 @@ def execute_repo_tick(
                     raise RepoExecutionError(f"Failed to import bd wrappers: {e}") from e
 
                 issue = bd_show(repo_root=repo_policy.path, issue_id=item.bead_id)
-                if issue.status == "closed":
+                skip_for_status = _bead_skip_for_issue_status(issue.status)
+                if skip_for_status is not None:
+                    outcome, detail = skip_for_status
                     bead_audits.append(
                         {
                             "bead_id": item.bead_id,
                             "title": item.title,
-                            "outcome": "skipped_closed",
-                            "detail": "Issue already closed; skipping per conservative policy.",
+                            "outcome": outcome,
+                            "detail": detail,
                         }
                     )
                     bead_results.append(
                         BeadResult(
                             bead_id=item.bead_id,
                             title=item.title,
-                            outcome="skipped_closed",
-                            detail="Issue already closed; skipping per conservative policy.",
-                        )
-                    )
-                    continue
-                if issue.status == "blocked":
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "skipped_blocked",
-                            "detail": "Issue is blocked; skipping per conservative policy.",
-                        }
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="skipped_blocked",
-                            detail="Issue is blocked; skipping per conservative policy.",
-                        )
-                    )
-                    continue
-                if issue.status not in {"open", "in_progress"}:
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "skipped_not_open",
-                            "detail": f"Unsupported status={issue.status!r}; skipping.",
-                        }
-                    )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="skipped_not_open",
-                            detail=f"Unsupported status={issue.status!r}; skipping.",
+                            outcome=outcome,
+                            detail=detail,
                         )
                     )
                     continue
@@ -1596,8 +1572,32 @@ def execute_repo_tick(
                 )
                 attempt = 0
                 env_preflight_checked = False
+                stop_retry_attempts = False
 
                 while True:
+                    issue = bd_show(repo_root=repo_policy.path, issue_id=item.bead_id)
+                    skip_for_status = _bead_skip_for_issue_status(issue.status)
+                    if skip_for_status is not None:
+                        outcome, detail = skip_for_status
+                        bead_audits.append(
+                            {
+                                "bead_id": item.bead_id,
+                                "title": item.title,
+                                "outcome": outcome,
+                                "detail": detail,
+                            }
+                        )
+                        bead_results.append(
+                            BeadResult(
+                                bead_id=item.bead_id,
+                                title=item.title,
+                                outcome=outcome,
+                                detail=detail,
+                            )
+                        )
+                        stop_retry_attempts = True
+                        break
+
                     attempt += 1
                     now = _now()
                     remaining = _remaining_bead_time(
@@ -2360,6 +2360,8 @@ def execute_repo_tick(
 
                 if stop_reason is not None:
                     break
+                if stop_retry_attempts:
+                    continue
 
                 if not any(
                     _is_behavioral_test_command(c)
