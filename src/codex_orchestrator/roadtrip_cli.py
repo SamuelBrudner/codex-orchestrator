@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -49,6 +50,24 @@ def _load_enforced_ai_settings() -> AiSettings:
     except AiPolicyError as e:
         raise SystemExit(f"codex-roadtrip: {e}") from e
     return settings
+
+
+def _count_bead_outcomes(beads: Sequence[object]) -> tuple[int, int]:
+    """Return (closed, failed) counts for a repo tick.
+
+    repo_execution emits BeadResult.outcome in {"closed","failed",...}. Roadtrip's
+    human log historically used "completed"; treat "closed" as completed.
+    """
+
+    closed = 0
+    failed = 0
+    for bead in beads:
+        outcome = getattr(bead, "outcome", None)
+        if outcome == "closed":
+            closed += 1
+        elif outcome == "failed":
+            failed += 1
+    return closed, failed
 
 
 def _maybe_end_stale_manual_run(paths: OrchestratorPaths) -> None:
@@ -255,8 +274,7 @@ def main(argv: list[str] | None = None) -> int:
 
         tick = cycle_result.tick_result
         for repo_result in cycle_result.repo_results:
-            beads_done = len([b for b in repo_result.bead_results if b.outcome == "completed"])
-            beads_failed = len([b for b in repo_result.bead_results if b.outcome == "failed"])
+            beads_done, beads_failed = _count_bead_outcomes(repo_result.bead_results)
             print(
                 f"  repo={repo_result.repo_id} beads_completed={beads_done} beads_failed={beads_failed}",
                 flush=True,
