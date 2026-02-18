@@ -397,6 +397,7 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     assert "sns.someplot(data=df.query" in codex_prompt
 
     report_text = (repo_root / "docs" / "runs" / f"{run_id}.md").read_text(encoding="utf-8")
+    assert "## Aims and Design Rationale" in report_text
     assert "## Planning Audit" in report_text
     audit_json_rel = f"runs/{run_id}/test_repo.planning_audit.json"
     audit_md_rel = f"runs/{run_id}/test_repo.planning_audit.md"

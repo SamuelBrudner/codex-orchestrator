@@ -1169,6 +1169,7 @@ def execute_repo_tick(
     run_report_committed: bool = False
     deck_path: Path | None = None
     reused_existing_deck: bool | None = None
+    planned_scope: list[dict[str, str]] = []
     last_dependency_signature: tuple[tuple[str, int, int], ...] | None = None
     failure_snapshot_committed = False
 
@@ -1227,10 +1228,24 @@ def execute_repo_tick(
             "json_exists": planning_audit_json_path.exists(),
             "md_exists": planning_audit_md_path.exists(),
         }
+        high_level_context = {
+            "focus": config.focus,
+            "planned_beads": list(planned_scope),
+            "replan_requested": bool(config.replan),
+            "reused_existing_deck": reused_existing_deck,
+            "planning_skipped_count": len(planning_skipped),
+            "safety": {
+                "max_beads_per_tick": config.max_beads_per_tick,
+                "min_minutes_to_start_new_bead": config.min_minutes_to_start_new_bead,
+                "diff_cap_files": config.diff_caps.max_files_changed,
+                "diff_cap_lines": config.diff_caps.max_lines_added,
+            },
+        }
         content = format_repo_run_report_md(
             repo_id=repo_policy.repo_id,
             run_id=run_id,
             branch=branch,
+            high_level_context=high_level_context,
             planning_audit=planning_audit,
             ai_settings=config.ai_settings.to_json_dict(),
             codex_command=codex_command,
@@ -1460,6 +1475,9 @@ def execute_repo_tick(
                 )
                 deck_path = deck_plan.deck_path
                 reused_existing_deck = deck_plan.reused_existing_deck
+                planned_scope = [
+                    {"bead_id": item.bead_id, "title": item.title} for item in deck_plan.deck.items
+                ]
                 if deck_plan.planning is not None:
                     planning_skipped = [
                         {

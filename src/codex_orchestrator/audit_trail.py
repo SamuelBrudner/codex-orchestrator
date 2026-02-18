@@ -102,11 +102,114 @@ def collect_tool_versions(*, safe_cwd: Path) -> dict[str, str]:
     return versions
 
 
+def _coerce_context_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _append_high_level_context(
+    lines: list[str],
+    *,
+    high_level_context: Mapping[str, Any] | None,
+) -> None:
+    lines.append("## Aims and Design Rationale")
+
+    focus: str | None = None
+    planned_beads: list[tuple[str, str]] = []
+    replan_requested = False
+    reused_existing_deck: bool | None = None
+    planning_skipped_count = 0
+    safety: Mapping[str, Any] = {}
+
+    if high_level_context is not None:
+        focus_raw = high_level_context.get("focus")
+        if isinstance(focus_raw, str) and focus_raw.strip():
+            focus = focus_raw.strip()
+
+        planned_raw = high_level_context.get("planned_beads")
+        if isinstance(planned_raw, list):
+            for item in planned_raw:
+                if not isinstance(item, Mapping):
+                    continue
+                bead_id = item.get("bead_id")
+                title = item.get("title")
+                if not isinstance(bead_id, str) or not bead_id.strip():
+                    continue
+                if not isinstance(title, str):
+                    title = ""
+                planned_beads.append((bead_id.strip(), title.strip()))
+
+        replan_raw = high_level_context.get("replan_requested")
+        if isinstance(replan_raw, bool):
+            replan_requested = replan_raw
+
+        reused_raw = high_level_context.get("reused_existing_deck")
+        if isinstance(reused_raw, bool):
+            reused_existing_deck = reused_raw
+
+        skipped_raw = _coerce_context_int(high_level_context.get("planning_skipped_count"))
+        if skipped_raw is not None and skipped_raw >= 0:
+            planning_skipped_count = skipped_raw
+
+        safety_raw = high_level_context.get("safety")
+        if isinstance(safety_raw, Mapping):
+            safety = safety_raw
+
+    if focus:
+        lines.append(f'- Aim: Prioritize work aligned with focus: "{focus}".')
+    else:
+        lines.append(
+            "- Aim: Close planned beads with minimal, validation-backed changes and clear auditability."
+        )
+
+    if planned_beads:
+        planned_ids = [f"`{bead_id}`" for bead_id, _ in planned_beads]
+        preview = ", ".join(planned_ids[:8])
+        if len(planned_ids) > 8:
+            preview += f", +{len(planned_ids) - 8} more"
+        lines.append(f"- Planned scope: {preview}")
+    else:
+        lines.append("- Planned scope: unavailable (planning did not produce a deck snapshot).")
+
+    if reused_existing_deck is True:
+        lines.append("- Rationale: Reused existing run deck to keep scope deterministic for this RUN_ID.")
+    elif reused_existing_deck is False and replan_requested:
+        lines.append("- Rationale: Replanned deck this tick (`--replan`) to refresh scope from live ready work.")
+    elif reused_existing_deck is False:
+        lines.append("- Rationale: Built and froze a fresh deck snapshot for deterministic execution.")
+
+    min_minutes = _coerce_context_int(safety.get("min_minutes_to_start_new_bead"))
+    max_beads = _coerce_context_int(safety.get("max_beads_per_tick"))
+    diff_cap_files = _coerce_context_int(safety.get("diff_cap_files"))
+    diff_cap_lines = _coerce_context_int(safety.get("diff_cap_lines"))
+    if (
+        min_minutes is not None
+        and max_beads is not None
+        and diff_cap_files is not None
+        and diff_cap_lines is not None
+    ):
+        lines.append(
+            "- Rationale: Safety budgets constrained execution "
+            f"(max_beads_per_tick={max_beads}, "
+            f"min_minutes_to_start_new_bead={min_minutes}, "
+            f"diff_cap_files={diff_cap_files}, diff_cap_lines={diff_cap_lines})."
+        )
+
+    if planning_skipped_count > 0:
+        lines.append(
+            "- Rationale: Planner skipped "
+            f"{planning_skipped_count} bead(s) due to focus/contract gating to avoid low-signal work."
+        )
+    lines.append("")
+
+
 def format_repo_run_report_md(
     *,
     repo_id: str,
     run_id: str,
     branch: str | None,
+    high_level_context: Mapping[str, Any] | None = None,
     planning_audit: Mapping[str, Any] | None = None,
     ai_settings: Mapping[str, str] | None,
     codex_command: str | None,
@@ -145,6 +248,8 @@ def format_repo_run_report_md(
     lines.append(f"- RUN_ID: `{run_id}`")
     lines.append(f"- Branch: `{branch_display}`")
     lines.append("")
+
+    _append_high_level_context(lines, high_level_context=high_level_context)
 
     lines.append("## Planning Audit")
     if planning_audit is None:
