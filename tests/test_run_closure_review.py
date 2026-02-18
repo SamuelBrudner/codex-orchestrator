@@ -166,7 +166,7 @@ def test_write_final_review_creates_deterministic_artifacts(tmp_path: Path) -> N
         },
     )
 
-    ai_settings = AiSettings(model="gpt-5.2", reasoning_effort="xhigh")
+    ai_settings = AiSettings(model="gpt-5.3-codex", reasoning_effort="xhigh")
     review_1 = build_final_review(paths, run_id=run_id, ai_settings=ai_settings)
     review_2 = build_final_review(paths, run_id=run_id, ai_settings=ai_settings)
     assert review_1 == review_2
@@ -196,7 +196,7 @@ def test_orchestrator_cycle_writes_final_review_on_end(tmp_path: Path) -> None:
     result = run_orchestrator_cycle(
         cache_dir=cache_dir,
         mode="manual",
-        ai_settings=AiSettings(model="gpt-5.2", reasoning_effort="xhigh"),
+        ai_settings=AiSettings(model="gpt-5.3-codex", reasoning_effort="xhigh"),
         repo_config_path=tmp_path / "unused_repos.toml",
         overlays_dir=tmp_path / "unused_overlays",
         idle_ticks_to_end=1,
@@ -269,7 +269,7 @@ def test_review_only_codex_pass_enforces_zero_diffs(tmp_path: Path, monkeypatch:
         run_review_only_codex_pass(
             paths,
             run_id=run_id,
-            ai_settings=AiSettings(model="gpt-5.2", reasoning_effort="xhigh"),
+            ai_settings=AiSettings(model="gpt-5.3-codex", reasoning_effort="xhigh"),
             timeout_seconds=5.0,
         )
     assert (paths.run_dir(run_id) / "final_codex_review.repo_x.json").exists()
@@ -308,11 +308,10 @@ def test_review_only_codex_pass_allows_clean_stdout_only(tmp_path: Path, monkeyp
     logs = run_review_only_codex_pass(
         paths,
         run_id=run_id,
-        ai_settings=AiSettings(model="gpt-5.2", reasoning_effort="xhigh"),
+        ai_settings=AiSettings(model="gpt-5.3-codex", reasoning_effort="xhigh"),
         timeout_seconds=5.0,
     )
     assert len(logs) == 1
     assert logs[0].repo_id == "repo_x"
     assert logs[0].path.exists()
     assert _git(repo_root, "status", "--porcelain") == ""
-

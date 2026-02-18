@@ -37,7 +37,7 @@ def test_enforce_unattended_ai_policy_rejects_mismatch(tmp_path: Path) -> None:
         "\n".join(
             [
                 "[ai]",
-                'model = "not-gpt-5.2"',
+                'model = "not-gpt-5.3-codex"',
                 'reasoning_effort = "low"',
                 "",
             ]
@@ -47,4 +47,3 @@ def test_enforce_unattended_ai_policy_rejects_mismatch(tmp_path: Path) -> None:
     settings = load_ai_settings(path)
     with pytest.raises(AiPolicyError, match="refusing to start"):
         enforce_unattended_ai_policy(settings, config_path=path)
-

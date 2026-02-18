@@ -9,7 +9,7 @@ class AiPolicyError(ValueError):
     pass
 
 
-REQUIRED_CODEX_MODEL = "gpt-5.2-codex"
+REQUIRED_CODEX_MODEL = "gpt-5.3-codex"
 REQUIRED_REASONING_EFFORT = "xhigh"
 
 
@@ -132,4 +132,3 @@ def codex_cli_args_for_settings(settings: AiSettings) -> tuple[str, ...]:
         "-c",
         f'reasoning_effort="{settings.reasoning_effort}"',
     )
-

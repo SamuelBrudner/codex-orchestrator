@@ -364,7 +364,7 @@ Rationale: human-readable provenance.
 
 All unattended runs use:
 
-* **Model**: `gpt-5.2-codex`
+* **Model**: `gpt-5.3-codex`
 * **Reasoning effort**: `xhigh`
 
 Rationale: favor correctness and coherence over speed.
