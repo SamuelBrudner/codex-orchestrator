@@ -1,0 +1,10 @@
+# Contract overlay for `PlaceMemoryRl`.
+#
+# `[defaults]` applies to all beads unless overridden.
+# `[beads."<BEAD_ID>"]` defines per-bead overrides (keyed by Beads issue id).
+
+[defaults]
+time_budget_minutes = 45
+env = "placememoryrl"
+allow_env_creation = false
+requires_notebook_execution = false
