@@ -217,7 +217,7 @@ def _focus_terms(focus: str | None) -> tuple[str, ...]:
 def _matches_focus(bead: ReadyBead, *, focus_terms: Sequence[str]) -> bool:
     if not focus_terms:
         return True
-    searchable_text = " ".join([bead.title, bead.description, *bead.labels]).lower()
+    searchable_text = " ".join([bead.bead_id, bead.title, bead.description, *bead.labels]).lower()
     if not searchable_text.strip():
         return False
     searchable_tokens = set(_FOCUS_TOKEN_RE.findall(searchable_text))

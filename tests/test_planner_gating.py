@@ -214,3 +214,47 @@ def test_planner_skips_epic_ready_beads(tmp_path: Path) -> None:
     assert len(result.skipped_beads) == 1
     assert result.skipped_beads[0].bead_id == "bd-epic"
     assert "Epic issue is intentionally skipped" in result.skipped_beads[0].next_action
+
+
+def test_planner_focus_can_match_bead_id_tokens(tmp_path: Path) -> None:
+    overlay_path = tmp_path / "test_repo.toml"
+    _write_overlay(
+        overlay_path,
+        "\n".join(
+            [
+                "[defaults]",
+                "time_budget_minutes = 45",
+                "allow_env_creation = false",
+                "requires_notebook_execution = false",
+                'validation_commands = ["pytest -q"]',
+                'env = "default_env"',
+                "",
+            ]
+        ),
+    )
+
+    policy = _policy(tmp_path=tmp_path)
+    beads = [
+        ReadyBead(
+            bead_id="PlumeStatistics-p26l",
+            title="Delete CLI shim modules",
+            issue_type="task",
+        ),
+        ReadyBead(
+            bead_id="PlumeStatistics-c1eo",
+            title="Unify CLI dispatch",
+            issue_type="task",
+        ),
+    ]
+
+    result = plan_deck_items(
+        repo_policy=policy,
+        overlay_path=overlay_path,
+        ready_beads=beads,
+        known_bead_ids={"PlumeStatistics-p26l", "PlumeStatistics-c1eo"},
+        focus="p26l",
+    )
+
+    assert [item.bead_id for item in result.deck_items] == ["PlumeStatistics-p26l"]
+    assert len(result.skipped_beads) == 1
+    assert result.skipped_beads[0].bead_id == "PlumeStatistics-c1eo"
