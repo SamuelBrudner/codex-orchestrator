@@ -178,3 +178,39 @@ def test_planner_focus_filters_ready_beads_into_deck(tmp_path: Path) -> None:
     assert len(result.skipped_beads) == 1
     assert result.skipped_beads[0].bead_id == "bd-other"
     assert "Excluded by focus filter" in result.skipped_beads[0].next_action
+
+
+def test_planner_skips_epic_ready_beads(tmp_path: Path) -> None:
+    overlay_path = tmp_path / "test_repo.toml"
+    _write_overlay(
+        overlay_path,
+        "\n".join(
+            [
+                "[defaults]",
+                "time_budget_minutes = 45",
+                "allow_env_creation = false",
+                "requires_notebook_execution = false",
+                'validation_commands = ["pytest -q"]',
+                'env = "default_env"',
+                "",
+            ]
+        ),
+    )
+
+    policy = _policy(tmp_path=tmp_path)
+    beads = [
+        ReadyBead(bead_id="bd-epic", title="Epic bead", issue_type="epic"),
+        ReadyBead(bead_id="bd-task", title="Task bead", issue_type="task"),
+    ]
+
+    result = plan_deck_items(
+        repo_policy=policy,
+        overlay_path=overlay_path,
+        ready_beads=beads,
+        known_bead_ids={"bd-epic", "bd-task"},
+    )
+
+    assert [item.bead_id for item in result.deck_items] == ["bd-task"]
+    assert len(result.skipped_beads) == 1
+    assert result.skipped_beads[0].bead_id == "bd-epic"
+    assert "Epic issue is intentionally skipped" in result.skipped_beads[0].next_action

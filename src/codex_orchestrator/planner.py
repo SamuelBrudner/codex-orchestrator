@@ -56,6 +56,7 @@ class ReadyBead:
     title: str
     labels: tuple[str, ...] = ()
     description: str = ""
+    issue_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +224,13 @@ def _matches_focus(bead: ReadyBead, *, focus_terms: Sequence[str]) -> bool:
     return any(term in searchable_tokens for term in focus_terms)
 
 
+def _is_epic_bead(bead: ReadyBead) -> bool:
+    issue_type = bead.issue_type
+    if issue_type is None:
+        return False
+    return issue_type.strip().lower() == "epic"
+
+
 def plan_deck_items(
     *,
     repo_policy: RepoPolicy,
@@ -245,6 +253,19 @@ def plan_deck_items(
     deck_items: list[PlannedDeckItem] = []
     skipped: list[SkippedBead] = []
     for bead in ready_beads:
+        if _is_epic_bead(bead):
+            skipped.append(
+                SkippedBead(
+                    bead_id=bead.bead_id,
+                    title=bead.title,
+                    next_action=(
+                        "Epic issue is intentionally skipped for execution. "
+                        "Queue task-level child beads instead."
+                    ),
+                )
+            )
+            continue
+
         if not _matches_focus(bead, focus_terms=focus_tokens):
             skipped.append(
                 SkippedBead(

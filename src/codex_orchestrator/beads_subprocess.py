@@ -183,6 +183,9 @@ def bd_ready(*, repo_root: Path, limit: int = DEFAULT_BD_READY_LIMIT) -> list[Re
             raise BdCliError(f"bd ready --json: missing string id at index {idx}")
         if not isinstance(title, str) or not title.strip():
             raise BdCliError(f"bd ready --json: missing string title at index {idx}")
+        issue_type = item.get("issue_type")
+        if issue_type is not None and not isinstance(issue_type, str):
+            issue_type = None
         labels_raw = item.get("labels", [])
         if labels_raw is None:
             labels_raw = []
@@ -190,7 +193,15 @@ def bd_ready(*, repo_root: Path, limit: int = DEFAULT_BD_READY_LIMIT) -> list[Re
             raise BdCliError(f"bd ready --json: labels must be a list at index {idx}")
         labels = tuple(str(lbl) for lbl in labels_raw if isinstance(lbl, str))
         description = item.get("description", "") or ""
-        out.append(ReadyBead(bead_id=bead_id, title=title, labels=labels, description=str(description)))
+        out.append(
+            ReadyBead(
+                bead_id=bead_id,
+                title=title,
+                labels=labels,
+                description=str(description),
+                issue_type=issue_type,
+            )
+        )
     return out
 
 

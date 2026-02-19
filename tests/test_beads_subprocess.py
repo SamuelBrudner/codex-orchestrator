@@ -112,7 +112,10 @@ def test_bd_ready_uses_explicit_limit(tmp_path: Path, monkeypatch) -> None:
             str(beads_subprocess.DEFAULT_BD_READY_LIMIT),
         ]
         assert cwd == repo_root
-        return '[{"id":"bd-1","title":"Ready bead","labels":["x"],"description":"d"}]'
+        return (
+            '[{"id":"bd-1","title":"Ready bead","labels":["x"],'
+            '"description":"d","issue_type":"task"}]'
+        )
 
     monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
 
@@ -121,6 +124,7 @@ def test_bd_ready_uses_explicit_limit(tmp_path: Path, monkeypatch) -> None:
     assert len(out) == 1
     assert out[0].bead_id == "bd-1"
     assert out[0].title == "Ready bead"
+    assert out[0].issue_type == "task"
 
 
 def test_bd_ready_rejects_non_positive_limit(tmp_path: Path) -> None:
