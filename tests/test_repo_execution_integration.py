@@ -442,6 +442,143 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     assert "pytest" in run_calls[0]
 
 
+def test_execute_repo_tick_auto_closes_parent_epic_when_child_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _git(repo_root, "init", "-b", "main")
+    _git(repo_root, "config", "user.name", "Test")
+    _git(repo_root, "config", "user.email", "test@example.com")
+    (repo_root / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+    (repo_root / "test_dummy.py").write_text(
+        "def test_ok():\n    assert 1 + 1 == 2\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "init")
+
+    (repo_root / ".fake_beads.json").write_text(
+        json.dumps(
+            {
+                "bd-epic": {
+                    "id": "bd-epic",
+                    "title": "Parent epic",
+                    "status": "in_progress",
+                    "notes": "",
+                    "issue_type": "epic",
+                    "dependencies": [],
+                    "dependents": [
+                        {"id": "bd-1", "dependency_type": "parent-child"},
+                    ],
+                },
+                "bd-1": {
+                    "id": "bd-1",
+                    "title": "Child bead",
+                    "status": "open",
+                    "notes": "",
+                    "issue_type": "task",
+                    "parent": "bd-epic",
+                    "dependencies": [
+                        {"id": "bd-epic", "dependency_type": "parent-child"},
+                    ],
+                    "dependents": [],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(repo_root, "add", ".fake_beads.json")
+    _git(repo_root, "commit", "-m", "beads init")
+
+    cache_dir = tmp_path / "cache"
+    paths = OrchestratorPaths(cache_dir=cache_dir)
+    run_id = "20250101-000000-cafefeed"
+
+    contract = ResolvedExecutionContract(
+        time_budget_minutes=10,
+        validation_commands=("pytest -q",),
+        env="test",
+        allow_env_creation=False,
+        requires_notebook_execution=False,
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        notebook_roots=(Path("."),),
+        notebook_output_policy="strip",
+    )
+    baseline = ValidationResult(
+        command="pytest -q",
+        exit_code=0,
+        started_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        stdout="",
+        stderr="",
+    )
+    deck = RunDeck(
+        schema_version=2,
+        run_id=run_id,
+        repo_id="test_repo",
+        created_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        items=(
+            RunDeckItem(
+                bead_id="bd-1",
+                title="Child bead",
+                contract=contract,
+                baseline_validation=(baseline,),
+            ),
+        ),
+    )
+    write_run_deck(paths, deck=deck)
+
+    policy = RepoPolicy(
+        repo_id="test_repo",
+        path=repo_root,
+        base_branch="main",
+        env=None,
+        notebook_roots=(Path("."),),
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        validation_commands=("pytest -q",),
+        notebook_output_policy="strip",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_bd(bin_dir)
+    _write_fake_codex(bin_dir)
+    _write_fake_conda(bin_dir)
+    pytest_stub = bin_dir / "pytest"
+    pytest_stub.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    _make_executable(pytest_stub)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(seconds=30))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(seconds=30),
+            min_minutes_to_start_new_bead=0,
+            max_beads_per_tick=3,
+            diff_caps=DiffCaps(max_files_changed=10, max_lines_added=100),
+        ),
+    )
+
+    assert result.skipped is False
+    assert result.beads_closed == 1
+    issues = json.loads((repo_root / ".fake_beads.json").read_text(encoding="utf-8"))
+    assert issues["bd-1"]["status"] == "closed"
+    assert issues["bd-epic"]["status"] == "closed"
+    assert "Auto-closed epic after all parent-child beads closed" in issues["bd-epic"]["notes"]
+
+
 def test_execute_repo_tick_refreshes_env_on_dependency_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

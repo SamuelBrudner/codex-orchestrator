@@ -133,3 +133,52 @@ def test_bd_ready_rejects_non_positive_limit(tmp_path: Path) -> None:
 
     with pytest.raises(beads_subprocess.BdCliError, match="bd ready limit must be >= 1"):
         beads_subprocess.bd_ready(repo_root=repo_root, limit=0)
+
+
+def test_bd_show_parses_parent_and_dependency_links(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        assert args == ["show", "bd-1", "--json"]
+        assert cwd == repo_root
+        return json_payload
+
+    json_payload = (
+        '[{"id":"bd-1","title":"Child bead","status":"open","notes":"",'
+        '"parent":"bd-epic",'
+        '"dependencies":[{"id":"bd-epic","dependency_type":"parent-child","status":"open","issue_type":"epic"}],'
+        '"dependents":[{"id":"bd-2","dependency_type":"blocks","status":"open","issue_type":"task"}]}]'
+    )
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    issue = beads_subprocess.bd_show(repo_root=repo_root, issue_id="bd-1")
+
+    assert issue.parent_id == "bd-epic"
+    assert issue.dependencies == ("bd-epic",)
+    assert issue.dependents == ("bd-2",)
+    assert issue.dependency_links[0].issue_id == "bd-epic"
+    assert issue.dependency_links[0].dependency_type == "parent-child"
+    assert issue.dependent_links[0].issue_id == "bd-2"
+    assert issue.dependent_links[0].dependency_type == "blocks"
+
+
+def test_bd_show_infers_parent_from_parent_child_dependency(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        assert args == ["show", "bd-1", "--json"]
+        assert cwd == repo_root
+        return (
+            '[{"id":"bd-1","title":"Child bead","status":"open","notes":"",'
+            '"dependencies":[{"id":"bd-epic","dependency_type":"parent-child"}],'
+            '"dependents":[]}]'
+        )
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    issue = beads_subprocess.bd_show(repo_root=repo_root, issue_id="bd-1")
+
+    assert issue.parent_id == "bd-epic"

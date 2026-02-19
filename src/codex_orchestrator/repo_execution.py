@@ -756,6 +756,67 @@ def _bead_skip_for_issue_status(status: str) -> tuple[BeadOutcome, str] | None:
     return None
 
 
+def _maybe_close_parent_epic(
+    *,
+    repo_root: Path,
+    closed_issue: Any,
+    run_id: str,
+    run_branch: str,
+    bd_show: Any,
+    bd_update: Any,
+    bd_close: Any,
+) -> str | None:
+    parent_id = getattr(closed_issue, "parent_id", None)
+    if not isinstance(parent_id, str) or not parent_id.strip():
+        return None
+    parent_id = parent_id.strip()
+
+    parent_issue = bd_show(repo_root=repo_root, issue_id=parent_id)
+    if (getattr(parent_issue, "issue_type", None) or "").strip().lower() != "epic":
+        return None
+    if parent_issue.status.strip().lower() == "closed":
+        return None
+
+    child_ids: list[str] = []
+    for link in getattr(parent_issue, "dependent_links", ()):
+        dep_type = getattr(link, "dependency_type", None)
+        if (dep_type or "").strip().lower() != "parent-child":
+            continue
+        child_id = getattr(link, "issue_id", None)
+        if not isinstance(child_id, str) or not child_id.strip():
+            continue
+        child_ids.append(child_id.strip())
+
+    if not child_ids:
+        return None
+
+    seen: set[str] = set()
+    ordered_child_ids: list[str] = []
+    for child_id in child_ids:
+        if child_id in seen:
+            continue
+        seen.add(child_id)
+        ordered_child_ids.append(child_id)
+
+    for child_id in ordered_child_ids:
+        child_issue = bd_show(repo_root=repo_root, issue_id=child_id)
+        if child_issue.status.strip().lower() != "closed":
+            return None
+
+    parent_note = parent_issue.notes + ("\n" if parent_issue.notes else "")
+    parent_note += (
+        "[orchestrator] Auto-closed epic after all parent-child beads closed "
+        f"in RUN_ID={run_id} on {run_branch}."
+    )
+    bd_update(repo_root=repo_root, issue_id=parent_id, notes=parent_note)
+    bd_close(
+        repo_root=repo_root,
+        issue_id=parent_id,
+        reason=f"All parent-child beads closed in RUN_ID={run_id} on {run_branch}",
+    )
+    return parent_id
+
+
 def _infer_next_action(
     *,
     skipped: bool,
@@ -2611,6 +2672,22 @@ def execute_repo_tick(
                     )
                     bd_update(repo_root=repo_policy.path, issue_id=dependent_id, notes=dep_note)
 
+                auto_closed_parent_epic = _maybe_close_parent_epic(
+                    repo_root=repo_policy.path,
+                    closed_issue=issue,
+                    run_id=run_id,
+                    run_branch=run_branch,
+                    bd_show=bd_show,
+                    bd_update=bd_update,
+                    bd_close=bd_close,
+                )
+                if auto_closed_parent_epic is not None:
+                    bead_audit["auto_closed_parent_epic"] = auto_closed_parent_epic
+                    follow_ups.append(
+                        "Auto-closed parent epic "
+                        f"`{auto_closed_parent_epic}` after child `{item.bead_id}` closed."
+                    )
+
                 try:
                     git_stage_all(repo_root=repo_policy.path)
                     commit_hash = git_commit_amend_no_edit(repo_root=repo_policy.path)
@@ -2646,6 +2723,7 @@ def execute_repo_tick(
                     outcome="closed",
                     commit_hash=commit_hash,
                     dependents_updated=dependents_updated,
+                    auto_closed_parent_epic=bead_audit.get("auto_closed_parent_epic"),
                 )
 
             if stop_reason is None:

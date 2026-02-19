@@ -28,6 +28,17 @@ class BdIssue:
     priority: int | None = None
     issue_type: str | None = None
     owner: str | None = None
+    parent_id: str | None = None
+    dependency_links: tuple[BdIssueLink, ...] = ()
+    dependent_links: tuple[BdIssueLink, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class BdIssueLink:
+    issue_id: str
+    dependency_type: str | None = None
+    status: str | None = None
+    issue_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,13 +107,13 @@ def _parse_issue(data: Any, *, context: str) -> BdIssue:
     if not isinstance(notes, str):
         raise BdCliError(f"{context}: notes must be a string")
 
-    def _extract_ids(field: str) -> tuple[str, ...]:
+    def _extract_links(field: str) -> tuple[BdIssueLink, ...]:
         raw = data.get(field, [])
         if raw is None:
             raw = []
         if not isinstance(raw, list):
             raise BdCliError(f"{context}: {field} must be a list")
-        ids: list[str] = []
+        links: list[BdIssueLink] = []
         for idx, item in enumerate(raw):
             if not isinstance(item, dict):
                 raise BdCliError(
@@ -111,11 +122,29 @@ def _parse_issue(data: Any, *, context: str) -> BdIssue:
             dep_id = item.get("id")
             if not isinstance(dep_id, str) or not dep_id.strip():
                 raise BdCliError(f"{context}: {field}[{idx}].id missing string")
-            ids.append(dep_id)
-        return tuple(ids)
+            dep_type = item.get("dependency_type")
+            if dep_type is not None and not isinstance(dep_type, str):
+                dep_type = None
+            dep_status = item.get("status")
+            if dep_status is not None and not isinstance(dep_status, str):
+                dep_status = None
+            dep_issue_type = item.get("issue_type")
+            if dep_issue_type is not None and not isinstance(dep_issue_type, str):
+                dep_issue_type = None
+            links.append(
+                BdIssueLink(
+                    issue_id=dep_id,
+                    dependency_type=dep_type,
+                    status=dep_status,
+                    issue_type=dep_issue_type,
+                )
+            )
+        return tuple(links)
 
-    dependencies = _extract_ids("dependencies")
-    dependents = _extract_ids("dependents")
+    dependency_links = _extract_links("dependencies")
+    dependent_links = _extract_links("dependents")
+    dependencies = tuple(link.issue_id for link in dependency_links)
+    dependents = tuple(link.issue_id for link in dependent_links)
 
     priority_raw = data.get("priority")
     priority: int | None
@@ -134,6 +163,20 @@ def _parse_issue(data: Any, *, context: str) -> BdIssue:
     if owner is not None and not isinstance(owner, str):
         owner = None
 
+    parent_id = data.get("parent")
+    if parent_id is not None and not isinstance(parent_id, str):
+        parent_id = None
+    if isinstance(parent_id, str):
+        parent_id = parent_id.strip() or None
+    if parent_id is None:
+        parent_candidates = [
+            link.issue_id
+            for link in dependency_links
+            if (link.dependency_type or "").strip().lower() == "parent-child"
+        ]
+        if len(parent_candidates) == 1:
+            parent_id = parent_candidates[0]
+
     return BdIssue(
         issue_id=issue_id,
         title=title,
@@ -144,6 +187,9 @@ def _parse_issue(data: Any, *, context: str) -> BdIssue:
         priority=priority,
         issue_type=issue_type,
         owner=owner,
+        parent_id=parent_id,
+        dependency_links=dependency_links,
+        dependent_links=dependent_links,
     )
 
 
