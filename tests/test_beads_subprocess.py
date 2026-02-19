@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import codex_orchestrator.beads_subprocess as beads_subprocess
 
 
@@ -96,3 +98,34 @@ def test_bd_sync_ignores_non_json_output(tmp_path: Path, monkeypatch) -> None:
     out = beads_subprocess.bd_sync(repo_root=repo_root)
 
     assert out == {}
+
+
+def test_bd_ready_uses_explicit_limit(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        assert args == [
+            "ready",
+            "--json",
+            "--limit",
+            str(beads_subprocess.DEFAULT_BD_READY_LIMIT),
+        ]
+        assert cwd == repo_root
+        return '[{"id":"bd-1","title":"Ready bead","labels":["x"],"description":"d"}]'
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    out = beads_subprocess.bd_ready(repo_root=repo_root)
+
+    assert len(out) == 1
+    assert out[0].bead_id == "bd-1"
+    assert out[0].title == "Ready bead"
+
+
+def test_bd_ready_rejects_non_positive_limit(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    with pytest.raises(beads_subprocess.BdCliError, match="bd ready limit must be >= 1"):
+        beads_subprocess.bd_ready(repo_root=repo_root, limit=0)

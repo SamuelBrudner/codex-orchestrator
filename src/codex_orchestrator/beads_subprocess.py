@@ -14,6 +14,9 @@ class BdCliError(RuntimeError):
     pass
 
 
+DEFAULT_BD_READY_LIMIT = 200
+
+
 @dataclass(frozen=True, slots=True)
 class BdIssue:
     issue_id: str
@@ -158,8 +161,11 @@ def bd_init(*, repo_root: Path) -> None:
     _run_bd(["init", "--quiet"], cwd=repo_root)
 
 
-def bd_ready(*, repo_root: Path) -> list[ReadyBead]:
-    data = _parse_json_output(_run_bd(["ready", "--json"], cwd=repo_root))
+def bd_ready(*, repo_root: Path, limit: int = DEFAULT_BD_READY_LIMIT) -> list[ReadyBead]:
+    if limit < 1:
+        raise BdCliError(f"bd ready limit must be >= 1, got {limit}")
+
+    data = _parse_json_output(_run_bd(["ready", "--json", "--limit", str(limit)], cwd=repo_root))
     if data is None:
         return []
     if not isinstance(data, list):
