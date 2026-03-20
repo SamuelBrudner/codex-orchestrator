@@ -697,6 +697,33 @@ def _maybe_decompose_diff_cap_bead(
     return summary, tuple(created_ids)
 
 
+def _append_issue_failure_note(
+    *,
+    repo_root: Path,
+    issue_id: str,
+    note: str,
+    status: str | None = None,
+    reopen_closed: bool = False,
+) -> Any:
+    from codex_orchestrator.beads_subprocess import bd_show, bd_update
+
+    current_issue = bd_show(repo_root=repo_root, issue_id=issue_id)
+    next_status = status
+    prefix = ""
+    if reopen_closed and current_issue.status == "closed":
+        next_status = status if status is not None else "open"
+        prefix = (
+            "[orchestrator] Reopened because post-run checks failed after the bead was closed.\n"
+        )
+    merged_note = (current_issue.notes + "\n" if current_issue.notes else "") + prefix + note
+    return bd_update(
+        repo_root=repo_root,
+        issue_id=issue_id,
+        status=next_status,
+        notes=merged_note,
+    )
+
+
 def _remaining_bead_time(
     *,
     tick: TickBudget,
@@ -2130,11 +2157,11 @@ def execute_repo_tick(
                         else:
                             failure_detail = f"codex invocation crashed: {type(e).__name__}: {e}"
                             failure_error = f"{type(e).__name__}: {e}"
-                        bd_update(
+                        _append_issue_failure_note(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
-                            notes=(issue.notes + "\n" if issue.notes else "")
-                            + f"[orchestrator] codex invocation failed: {failure_error}",
+                            note=f"[orchestrator] codex invocation failed: {failure_error}",
+                            reopen_closed=True,
                         )
                         bead_results.append(
                             BeadResult(
@@ -2236,14 +2263,12 @@ def execute_repo_tick(
                         changed_paths=list(changed_paths),
                     )
                     if files_changed == 0:
-                        bd_update(
+                        _append_issue_failure_note(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
-                            notes=(
-                                (issue.notes + "\n" if issue.notes else "")
-                                + "[orchestrator] No git changes detected after codex; "
-                                "cannot commit/close."
-                            ),
+                            note="[orchestrator] No git changes detected after codex; cannot "
+                            "commit/close.",
+                            reopen_closed=True,
                         )
                         bead_results.append(
                             BeadResult(
@@ -2289,10 +2314,11 @@ def execute_repo_tick(
                             deny_roots=item.contract.deny_roots,
                         )
                     except GitError as e:
-                        bd_update(
+                        _append_issue_failure_note(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
-                            notes=(issue.notes + "\n" if issue.notes else "") + f"[orchestrator] {e}",
+                            note=f"[orchestrator] {e}",
+                            reopen_closed=True,
                         )
                         bead_results.append(
                             BeadResult(
@@ -2356,15 +2382,15 @@ def execute_repo_tick(
                                     repo_failures.append(
                                         f"{item.bead_id}: failed to clear run deck {deck_path}: {e}"
                                     )
-                        bd_update(
+                        _append_issue_failure_note(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
                             status="blocked" if followup_ids else None,
-                            notes=(issue.notes + "\n" if issue.notes else "")
-                            + "[orchestrator] Diff cap exceeded: "
+                            note="[orchestrator] Diff cap exceeded: "
                             + f"tick_files_changed={tick_files_changed + files_changed} "
                             + f"max={config.diff_caps.max_files_changed}"
                             + extra_notes,
+                            reopen_closed=True,
                         )
                         bead_results.append(
                             BeadResult(
@@ -2438,15 +2464,15 @@ def execute_repo_tick(
                                     repo_failures.append(
                                         f"{item.bead_id}: failed to clear run deck {deck_path}: {e}"
                                     )
-                        bd_update(
+                        _append_issue_failure_note(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
                             status="blocked" if followup_ids else None,
-                            notes=(issue.notes + "\n" if issue.notes else "")
-                            + "[orchestrator] Diff cap exceeded: "
+                            note="[orchestrator] Diff cap exceeded: "
                             + f"tick_lines_added={tick_lines_added + lines_added} "
                             + f"max={config.diff_caps.max_lines_added}"
                             + extra_notes,
+                            reopen_closed=True,
                         )
                         bead_results.append(
                             BeadResult(
@@ -2517,11 +2543,11 @@ def execute_repo_tick(
                                 error=refresh_result.error,
                             )
                             if refresh_result.error:
-                                bd_update(
+                                _append_issue_failure_note(
                                     repo_root=repo_policy.path,
                                     issue_id=item.bead_id,
-                                    notes=(issue.notes + "\n" if issue.notes else "")
-                                    + f"[orchestrator] Env refresh failed: {refresh_result.error}",
+                                    note=f"[orchestrator] Env refresh failed: {refresh_result.error}",
+                                    reopen_closed=True,
                                 )
                                 bead_results.append(
                                     BeadResult(
@@ -2552,11 +2578,11 @@ def execute_repo_tick(
                     try:
                         _require_validation_allowlist(item.contract.validation_commands)
                     except RepoExecutionError as e:
-                        bd_update(
+                        _append_issue_failure_note(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
-                            notes=(issue.notes + "\n" if issue.notes else "")
-                            + f"[orchestrator] {e}",
+                            note=f"[orchestrator] {e}",
+                            reopen_closed=True,
                         )
                         bead_results.append(
                             BeadResult(
@@ -2671,13 +2697,13 @@ def execute_repo_tick(
                             if preflight_result is not None and preflight_result.exit_code != 0:
                                 preflight_summary = _summarize_preflight_output(preflight_result)
                                 detail = "Validation env preflight failed."
-                                bd_update(
+                                _append_issue_failure_note(
                                     repo_root=repo_policy.path,
                                     issue_id=item.bead_id,
-                                    notes=(issue.notes + "\n" if issue.notes else "")
-                                    + "[orchestrator] Validation env preflight failed in "
+                                    note="[orchestrator] Validation env preflight failed in "
                                     + f"conda env {item.contract.env!r}; cannot proceed with retries.\n"
                                     + preflight_summary,
+                                    reopen_closed=True,
                                 )
                                 bead_results.append(
                                     BeadResult(
@@ -2780,14 +2806,14 @@ def execute_repo_tick(
                                         f"{item.bead_id}: failed to clear run deck {deck_path}: {e}"
                                     )
 
-                        bd_update(
+                        _append_issue_failure_note(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
                             status="blocked" if followup_ids else None,
-                            notes=(issue.notes + "\n" if issue.notes else "")
-                            + note_prefix
+                            note=note_prefix
                             + _format_validation_summary(validation_results)
                             + extra_notes,
+                            reopen_closed=True,
                         )
                         bead_results.append(
                             BeadResult(
@@ -2828,11 +2854,11 @@ def execute_repo_tick(
                     _is_behavioral_test_command(c)
                     for c in item.contract.validation_commands
                 ):
-                    bd_update(
+                    _append_issue_failure_note(
                         repo_root=repo_policy.path,
                         issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "")
-                        + "[orchestrator] No behavioral test command executed; cannot close.",
+                        note="[orchestrator] No behavioral test command executed; cannot close.",
+                        reopen_closed=True,
                     )
                     bead_results.append(
                         BeadResult(
@@ -2869,13 +2895,13 @@ def execute_repo_tick(
                     )
                     if missing_gwt:
                         formatted = "\n".join(f"- {p}" for p in missing_gwt)
-                        bd_update(
+                        _append_issue_failure_note(
                             repo_root=repo_policy.path,
                             issue_id=item.bead_id,
-                            notes=(issue.notes + "\n" if issue.notes else "")
-                            + "[orchestrator] Given/When/Then markers missing in modified tests; "
+                            note="[orchestrator] Given/When/Then markers missing in modified tests; "
                             "cannot close.\n"
                             + formatted,
+                            reopen_closed=True,
                         )
                         bead_results.append(
                             BeadResult(
@@ -2943,10 +2969,11 @@ def execute_repo_tick(
                         body=_commit_body(run_id=run_id, item=item, validation=validation_results),
                     )
                 except GitError as e:
-                    bd_update(
+                    _append_issue_failure_note(
                         repo_root=repo_policy.path,
                         issue_id=item.bead_id,
-                        notes=(issue.notes + "\n" if issue.notes else "") + f"[orchestrator] {e}",
+                        note=f"[orchestrator] {e}",
+                        reopen_closed=True,
                     )
                     bead_results.append(
                         BeadResult(
