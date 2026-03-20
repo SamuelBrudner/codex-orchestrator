@@ -183,6 +183,92 @@ def test_write_final_review_creates_deterministic_artifacts(tmp_path: Path) -> N
     assert [b["bead_id"] for b in loaded["repos"][0]["beads"]] == ["bd-1", "bd-2"]
 
 
+def test_build_final_review_prefers_summary_planned_scope_over_overwritten_deck(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    paths = OrchestratorPaths(cache_dir=cache_dir)
+    run_id = "20250101-000000-feedbeef"
+    now = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    _write_json(
+        paths.run_metadata_path(run_id),
+        {
+            "schema_version": 1,
+            "run_id": run_id,
+            "mode": "manual",
+            "created_at": now.isoformat(),
+            "last_tick_at": now.isoformat(),
+            "expires_at": now.isoformat(),
+            "tick_count": 2,
+            "consecutive_idle_ticks": 1,
+        },
+    )
+    _write_json(
+        paths.run_end_path(run_id),
+        {"run_id": run_id, "ended_at": "2025-01-01T00:10:00+00:00", "reason": "idle_ticks"},
+    )
+
+    empty_deck = RunDeck(
+        schema_version=2,
+        run_id=run_id,
+        repo_id="repo_x",
+        created_at=now,
+        items=(),
+    )
+    deck_path = write_run_deck(paths, deck=empty_deck)
+
+    _write_json(
+        paths.repo_summary_path(run_id, "repo_x"),
+        {
+            "schema_version": 1,
+            "run_id": run_id,
+            "repo_id": "repo_x",
+            "repo_path": "/tmp/repo_x",
+            "branch": f"run/{run_id}",
+            "skipped": False,
+            "skip_reason": None,
+            "stop_reason": "completed",
+            "beads_attempted": 1,
+            "beads_closed": 1,
+            "deck_path": deck_path.as_posix(),
+            "reused_existing_deck": False,
+            "high_level_context": {
+                "planned_beads": [{"bead_id": "bd-1", "title": "One"}],
+                "replan_requested": True,
+                "reused_existing_deck": False,
+                "planning_skipped_count": 0,
+                "safety": {
+                    "max_beads_per_tick": 3,
+                    "min_minutes_to_start_new_bead": 15,
+                    "diff_cap_files": 25,
+                    "diff_cap_lines": 1500,
+                },
+            },
+            "beads": [
+                {
+                    "bead_id": "bd-1",
+                    "title": "One",
+                    "outcome": "closed",
+                    "detail": "Closed successfully.",
+                    "validation": {"pytest -q": "ok"},
+                    "changed_paths": ["AGENTS.md"],
+                    "commit_hash": "0123456789abcdef",
+                }
+            ],
+            "next_action": "Review changes and open PR(s).",
+        },
+    )
+
+    review = build_final_review(
+        paths,
+        run_id=run_id,
+        ai_settings=AiSettings(model="gpt-5.4", reasoning_effort="xhigh"),
+    )
+
+    assert review["summary"]["beads_attempted_total"] == 1
+    assert review["summary"]["beads_closed_total"] == 1
+    assert review["repos"][0]["deck"]["planned_bead_ids"] == ["bd-1"]
+
+
 def test_orchestrator_cycle_writes_final_review_on_end(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     paths = OrchestratorPaths(cache_dir=cache_dir)

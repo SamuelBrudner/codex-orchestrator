@@ -16,6 +16,7 @@ from codex_orchestrator.repo_execution import (
     DiffCaps,
     RepoExecutionConfig,
     TickBudget,
+    _merge_repo_summary,
     execute_repo_tick,
 )
 from codex_orchestrator.repo_inventory import RepoPolicy
@@ -440,6 +441,88 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     assert "-n" in run_calls[0]
     assert run_calls[0][run_calls[0].index("-n") + 1] == "test"
     assert "pytest" in run_calls[0]
+
+
+def test_merge_repo_summary_preserves_cumulative_run_state_across_idle_ticks() -> None:
+    existing = {
+        "schema_version": 1,
+        "run_id": "run-123",
+        "repo_id": "repo_x",
+        "beads_attempted": 1,
+        "beads_closed": 1,
+        "beads": [
+            {
+                "bead_id": "bd-1",
+                "title": "One",
+                "outcome": "closed",
+                "detail": "Closed successfully.",
+            }
+        ],
+        "planning_skipped_beads": [{"bead_id": "bd-skip", "title": "Skip me"}],
+        "failures": ["planning warning"],
+        "follow_ups": ["open PR"],
+        "prompts": [{"bead_id": "bd-1", "attempt": 1, "path": "prompt-1.txt"}],
+        "validations": [{"command": "pytest -q", "status": "ok"}],
+        "notebook_refactors": {
+            "notebooks": ["analysis.ipynb"],
+            "extracted_code": ["analysis.py"],
+        },
+        "high_level_context": {
+            "focus": "overnight workflow",
+            "planned_beads": [{"bead_id": "bd-1", "title": "One"}],
+            "replan_requested": True,
+            "reused_existing_deck": False,
+            "planning_skipped_count": 1,
+            "safety": {
+                "max_beads_per_tick": 3,
+                "min_minutes_to_start_new_bead": 15,
+                "diff_cap_files": 25,
+                "diff_cap_lines": 1500,
+            },
+        },
+    }
+    current = {
+        "schema_version": 1,
+        "run_id": "run-123",
+        "repo_id": "repo_x",
+        "beads_attempted": 0,
+        "beads_closed": 0,
+        "beads": [],
+        "planning_skipped_beads": [],
+        "failures": [],
+        "follow_ups": [],
+        "prompts": [],
+        "validations": [],
+        "notebook_refactors": {"notebooks": [], "extracted_code": []},
+        "high_level_context": {
+            "focus": "overnight workflow",
+            "planned_beads": [],
+            "replan_requested": True,
+            "reused_existing_deck": False,
+            "planning_skipped_count": 0,
+            "safety": {
+                "max_beads_per_tick": 3,
+                "min_minutes_to_start_new_bead": 15,
+                "diff_cap_files": 25,
+                "diff_cap_lines": 1500,
+            },
+        },
+        "next_action": "Review changes and open PR(s).",
+    }
+
+    merged = _merge_repo_summary(existing, current)
+
+    assert merged["beads_attempted"] == 1
+    assert merged["beads_closed"] == 1
+    assert merged["beads"] == existing["beads"]
+    assert merged["planning_skipped_beads"] == existing["planning_skipped_beads"]
+    assert merged["failures"] == ["planning warning"]
+    assert merged["follow_ups"] == ["open PR"]
+    assert merged["prompts"] == existing["prompts"]
+    assert merged["validations"] == existing["validations"]
+    assert merged["notebook_refactors"] == existing["notebook_refactors"]
+    assert merged["high_level_context"]["planned_beads"] == existing["high_level_context"]["planned_beads"]
+    assert merged["high_level_context"]["planning_skipped_count"] == 1
 
 
 def test_execute_repo_tick_auto_closes_parent_epic_when_child_closes(

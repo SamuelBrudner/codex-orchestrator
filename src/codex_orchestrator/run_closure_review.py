@@ -126,7 +126,20 @@ def build_final_review(
         deck_path = Path(deck_path_raw) if isinstance(deck_path_raw, str) and deck_path_raw else None
 
         planned_bead_ids: list[str] | None = None
-        if deck_path is not None:
+        high_level_context = summary.get("high_level_context")
+        if isinstance(high_level_context, dict):
+            planned_beads = high_level_context.get("planned_beads")
+            if isinstance(planned_beads, list):
+                planned_bead_ids = []
+                for item in planned_beads:
+                    if not isinstance(item, dict):
+                        continue
+                    bead_id = item.get("bead_id")
+                    if isinstance(bead_id, str) and bead_id.strip():
+                        planned_bead_ids.append(bead_id.strip())
+                if not planned_bead_ids:
+                    planned_bead_ids = None
+        if planned_bead_ids is None and deck_path is not None:
             try:
                 deck = read_run_deck(deck_path)
             except (PlannerError, OSError):

@@ -881,6 +881,225 @@ def _write_run_summary(paths: OrchestratorPaths, *, run_id: str) -> None:
     )
 
 
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _summary_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    return 0
+
+
+def _summary_list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _summary_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _merge_unique_strings(*lists: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for values in lists:
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            merged.append(value)
+    return merged
+
+
+def _merge_records_by_keys(
+    existing: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+    *,
+    key_fields: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    index_by_key: dict[tuple[str, str], int] = {}
+
+    def _record_key(item: Mapping[str, Any]) -> tuple[str, str] | None:
+        for field in key_fields:
+            value = item.get(field)
+            if isinstance(value, str) and value.strip():
+                return (field, value.strip())
+        return None
+
+    for source in (existing, current):
+        for item in source:
+            record = dict(item)
+            record_key = _record_key(record)
+            if record_key is None:
+                merged.append(record)
+                continue
+            idx = index_by_key.get(record_key)
+            if idx is None:
+                index_by_key[record_key] = len(merged)
+                merged.append(record)
+                continue
+            merged[idx].update(record)
+    return merged
+
+
+def _merge_notebook_refactors(existing: Any, current: Any) -> dict[str, list[str]]:
+    existing_map = existing if isinstance(existing, dict) else {}
+    current_map = current if isinstance(current, dict) else {}
+    return {
+        "notebooks": _merge_unique_strings(
+            _summary_string_list(existing_map.get("notebooks")),
+            _summary_string_list(current_map.get("notebooks")),
+        ),
+        "extracted_code": _merge_unique_strings(
+            _summary_string_list(existing_map.get("extracted_code")),
+            _summary_string_list(current_map.get("extracted_code")),
+        ),
+    }
+
+
+def _merge_high_level_context(
+    existing: Any,
+    current: Any,
+    *,
+    planning_skipped: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    existing_map = existing if isinstance(existing, dict) else {}
+    current_map = current if isinstance(current, dict) else {}
+
+    focus = current_map.get("focus")
+    if not isinstance(focus, str) or not focus.strip():
+        focus = existing_map.get("focus")
+    if not isinstance(focus, str) or not focus.strip():
+        focus = None
+
+    safety = current_map.get("safety")
+    if not isinstance(safety, dict):
+        safety = existing_map.get("safety") if isinstance(existing_map.get("safety"), dict) else None
+
+    replan_requested = current_map.get("replan_requested")
+    if not isinstance(replan_requested, bool):
+        replan_requested = (
+            existing_map.get("replan_requested")
+            if isinstance(existing_map.get("replan_requested"), bool)
+            else None
+        )
+
+    reused_existing_deck = current_map.get("reused_existing_deck")
+    if not isinstance(reused_existing_deck, bool):
+        reused_existing_deck = (
+            existing_map.get("reused_existing_deck")
+            if isinstance(existing_map.get("reused_existing_deck"), bool)
+            else None
+        )
+
+    planned_beads = _merge_records_by_keys(
+        _summary_list_of_dicts(existing_map.get("planned_beads")),
+        _summary_list_of_dicts(current_map.get("planned_beads")),
+        key_fields=("bead_id",),
+    )
+
+    if (
+        focus is None
+        and not planned_beads
+        and safety is None
+        and replan_requested is None
+        and reused_existing_deck is None
+        and not planning_skipped
+    ):
+        return None
+
+    return {
+        "focus": focus,
+        "planned_beads": planned_beads,
+        "replan_requested": replan_requested,
+        "reused_existing_deck": reused_existing_deck,
+        "planning_skipped_count": len(planning_skipped),
+        "safety": safety,
+    }
+
+
+def _merge_repo_summary(
+    existing: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    if existing is None:
+        return current
+
+    merged_beads = _merge_records_by_keys(
+        _summary_list_of_dicts(existing.get("beads")),
+        _summary_list_of_dicts(current.get("beads")),
+        key_fields=("bead_id",),
+    )
+    merged_planning_skipped = _merge_records_by_keys(
+        _summary_list_of_dicts(existing.get("planning_skipped_beads")),
+        _summary_list_of_dicts(current.get("planning_skipped_beads")),
+        key_fields=("bead_id",),
+    )
+    merged_prompts = _merge_records_by_keys(
+        _summary_list_of_dicts(existing.get("prompts")),
+        _summary_list_of_dicts(current.get("prompts")),
+        key_fields=("path", "bead_id"),
+    )
+    merged_validations = _merge_records_by_keys(
+        _summary_list_of_dicts(existing.get("validations")),
+        _summary_list_of_dicts(current.get("validations")),
+        key_fields=("command",),
+    )
+
+    merged = dict(existing)
+    merged.update(current)
+    merged["beads_attempted"] = _summary_int(existing.get("beads_attempted")) + _summary_int(
+        current.get("beads_attempted")
+    )
+    merged["beads_closed"] = _summary_int(existing.get("beads_closed")) + _summary_int(
+        current.get("beads_closed")
+    )
+    merged["beads"] = merged_beads
+    merged["planning_skipped_beads"] = merged_planning_skipped
+    merged["failures"] = _merge_unique_strings(
+        _summary_string_list(existing.get("failures")),
+        _summary_string_list(current.get("failures")),
+    )
+    merged["follow_ups"] = _merge_unique_strings(
+        _summary_string_list(existing.get("follow_ups")),
+        _summary_string_list(current.get("follow_ups")),
+    )
+    merged["prompts"] = merged_prompts
+    merged["validations"] = merged_validations
+    merged["notebook_refactors"] = _merge_notebook_refactors(
+        existing.get("notebook_refactors"),
+        current.get("notebook_refactors"),
+    )
+    merged["high_level_context"] = _merge_high_level_context(
+        existing.get("high_level_context"),
+        current.get("high_level_context"),
+        planning_skipped=merged_planning_skipped,
+    )
+    if current.get("run_report_path") is None and isinstance(existing.get("run_report_path"), str):
+        merged["run_report_path"] = existing.get("run_report_path")
+    return merged
+
+
 def _count_lines_limited(path: Path, *, byte_limit: int = 2_000_000) -> int:
     try:
         data = path.read_bytes()
@@ -1233,6 +1452,9 @@ def execute_repo_tick(
     planned_scope: list[dict[str, str]] = []
     last_dependency_signature: tuple[tuple[str, int, int], ...] | None = None
     failure_snapshot_committed = False
+    beads_attempted = 0
+    beads_closed = 0
+    stop_reason: RepoStopReason | None = None
 
     planning_audit_json_path = paths.repo_planning_audit_json_path(run_id, repo_policy.repo_id)
     planning_audit_md_path = paths.repo_planning_audit_md_path(run_id, repo_policy.repo_id)
@@ -1250,7 +1472,77 @@ def execute_repo_tick(
         with events_lock:
             append_jsonl(events_path, payload)
 
-    def maybe_write_repo_report(*, branch: str | None) -> Path | None:
+    def _current_summary_payload(*, branch: str | None) -> dict[str, Any]:
+        next_action = _infer_next_action(
+            skipped=False,
+            skip_reason=None,
+            stop_reason=stop_reason,
+            bead_audits=bead_audits,
+        )
+        codex_argv = (
+            "codex",
+            "exec",
+            "--full-auto",
+            *codex_cli_args_for_settings(config.ai_settings),
+        )
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "repo_id": repo_policy.repo_id,
+            "repo_path": repo_policy.path.as_posix(),
+            "branch": branch,
+            "skipped": False,
+            "skip_reason": None,
+            "stop_reason": stop_reason,
+            "beads_attempted": beads_attempted,
+            "beads_closed": beads_closed,
+            "deck_path": deck_path.as_posix() if deck_path is not None else None,
+            "reused_existing_deck": reused_existing_deck,
+            "planning_audit": {
+                "json_path": planning_audit_json_path.as_posix(),
+                "md_path": planning_audit_md_path.as_posix(),
+                "json_exists": planning_audit_json_path.exists(),
+                "md_exists": planning_audit_md_path.exists(),
+            },
+            "run_report_path": run_report_path.as_posix() if run_report_path is not None else None,
+            "beads": bead_audits,
+            "planning_skipped_beads": planning_skipped,
+            "failures": repo_failures,
+            "follow_ups": follow_ups,
+            "prompts": prompt_records,
+            "validations": [
+                {"command": cmd, "status": status}
+                for cmd, status in sorted(validation_status_by_command.items())
+            ],
+            "notebook_refactors": {
+                "notebooks": sorted(notebooks_touched),
+                "extracted_code": sorted(extracted_code_touched),
+            },
+            "high_level_context": {
+                "focus": config.focus,
+                "planned_beads": list(planned_scope),
+                "replan_requested": bool(config.replan),
+                "reused_existing_deck": reused_existing_deck,
+                "planning_skipped_count": len(planning_skipped),
+                "safety": {
+                    "max_beads_per_tick": config.max_beads_per_tick,
+                    "min_minutes_to_start_new_bead": config.min_minutes_to_start_new_bead,
+                    "diff_cap_files": config.diff_caps.max_files_changed,
+                    "diff_cap_lines": config.diff_caps.max_lines_added,
+                },
+            },
+            "ai_settings": config.ai_settings.to_json_dict(),
+            "codex_command": shlex.join(codex_argv),
+            "codex_argv": list(codex_argv),
+            "tool_versions": tool_versions,
+            "next_action": next_action,
+        }
+
+    def maybe_write_repo_report(
+        *,
+        branch: str | None,
+        summary: Mapping[str, Any] | None = None,
+    ) -> Path | None:
         nonlocal run_report_path
         if branch is None:
             return None
@@ -1267,58 +1559,50 @@ def execute_repo_tick(
             emit("run_report_skipped", reason=str(e))
             return None
 
-        notebook_refactors = {
-            "notebooks": sorted(notebooks_touched),
-            "extracted_code": sorted(extracted_code_touched),
-        }
-        validations = [
-            {"command": cmd, "status": status}
-            for cmd, status in sorted(validation_status_by_command.items())
-        ]
-        codex_command = shlex.join(
-            (
-                "codex",
-                "exec",
-                "--full-auto",
-                *codex_cli_args_for_settings(config.ai_settings),
+        live_summary = (
+            dict(summary)
+            if summary is not None
+            else _merge_repo_summary(
+                _load_json_object(summary_path),
+                _current_summary_payload(branch=branch),
             )
         )
-        planning_audit = {
-            "json_path": planning_audit_json_path.relative_to(paths.cache_dir).as_posix(),
-            "md_path": planning_audit_md_path.relative_to(paths.cache_dir).as_posix(),
-            "json_exists": planning_audit_json_path.exists(),
-            "md_exists": planning_audit_md_path.exists(),
-        }
-        high_level_context = {
-            "focus": config.focus,
-            "planned_beads": list(planned_scope),
-            "replan_requested": bool(config.replan),
-            "reused_existing_deck": reused_existing_deck,
-            "planning_skipped_count": len(planning_skipped),
-            "safety": {
-                "max_beads_per_tick": config.max_beads_per_tick,
-                "min_minutes_to_start_new_bead": config.min_minutes_to_start_new_bead,
-                "diff_cap_files": config.diff_caps.max_files_changed,
-                "diff_cap_lines": config.diff_caps.max_lines_added,
-            },
-        }
+        planning_audit = live_summary.get("planning_audit")
+        if isinstance(planning_audit, dict):
+            planning_audit = dict(planning_audit)
+            for key in ("json_path", "md_path"):
+                raw = planning_audit.get(key)
+                if not isinstance(raw, str) or not raw:
+                    continue
+                try:
+                    planning_audit[key] = Path(raw).relative_to(paths.cache_dir).as_posix()
+                except ValueError:
+                    planning_audit[key] = raw
+        else:
+            planning_audit = None
         content = format_repo_run_report_md(
             repo_id=repo_policy.repo_id,
             run_id=run_id,
             branch=branch,
-            high_level_context=high_level_context,
+            high_level_context=live_summary.get("high_level_context")
+            if isinstance(live_summary.get("high_level_context"), dict)
+            else None,
             planning_audit=planning_audit,
-            ai_settings=config.ai_settings.to_json_dict(),
-            codex_command=codex_command,
-            prompts=prompt_records,
-            beads=bead_audits,
-            planning_skipped=planning_skipped,
-            notebook_refactors=notebook_refactors,
-            validations=validations,
-            failures=repo_failures,
-            follow_ups=follow_ups,
+            ai_settings=live_summary.get("ai_settings")
+            if isinstance(live_summary.get("ai_settings"), dict)
+            else config.ai_settings.to_json_dict(),
+            codex_command=str(live_summary.get("codex_command") or ""),
+            prompts=_summary_list_of_dicts(live_summary.get("prompts")),
+            beads=_summary_list_of_dicts(live_summary.get("beads")),
+            planning_skipped=_summary_list_of_dicts(live_summary.get("planning_skipped_beads")),
+            notebook_refactors=live_summary.get("notebook_refactors")
+            if isinstance(live_summary.get("notebook_refactors"), dict)
+            else {"notebooks": [], "extracted_code": []},
+            validations=_summary_list_of_dicts(live_summary.get("validations")),
+            failures=_summary_string_list(live_summary.get("failures")),
+            follow_ups=_summary_string_list(live_summary.get("follow_ups")),
             tool_versions=tool_versions,
-            generated_at=tick.started_at,
+            generated_at=_now(),
         )
 
         try:
@@ -1347,7 +1631,7 @@ def execute_repo_tick(
             "--full-auto",
             *codex_cli_args_for_settings(config.ai_settings),
         )
-        summary = {
+        current_summary = {
             "schema_version": 1,
             "run_id": run_id,
             "repo_id": repo_policy.repo_id,
@@ -1371,12 +1655,36 @@ def execute_repo_tick(
             "planning_skipped_beads": planning_skipped,
             "failures": repo_failures,
             "follow_ups": follow_ups,
+            "prompts": prompt_records,
+            "validations": [
+                {"command": cmd, "status": status}
+                for cmd, status in sorted(validation_status_by_command.items())
+            ],
+            "notebook_refactors": {
+                "notebooks": sorted(notebooks_touched),
+                "extracted_code": sorted(extracted_code_touched),
+            },
+            "high_level_context": {
+                "focus": config.focus,
+                "planned_beads": list(planned_scope),
+                "replan_requested": bool(config.replan),
+                "reused_existing_deck": reused_existing_deck,
+                "planning_skipped_count": len(planning_skipped),
+                "safety": {
+                    "max_beads_per_tick": config.max_beads_per_tick,
+                    "min_minutes_to_start_new_bead": config.min_minutes_to_start_new_bead,
+                    "diff_cap_files": config.diff_caps.max_files_changed,
+                    "diff_cap_lines": config.diff_caps.max_lines_added,
+                },
+            },
             "ai_settings": config.ai_settings.to_json_dict(),
             "codex_command": shlex.join(codex_argv),
             "codex_argv": list(codex_argv),
             "tool_versions": tool_versions,
             "next_action": next_action,
         }
+        existing_summary = _load_json_object(summary_path)
+        summary = _merge_repo_summary(existing_summary, current_summary)
         write_json_atomic(summary_path, summary)
         _write_run_summary(paths, run_id=run_id)
         _append_log(
