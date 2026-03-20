@@ -82,6 +82,20 @@ def _parse_json_output(stdout: str) -> Any:
     payload = stdout.strip()
     if not payload:
         return None
+    candidates = [payload]
+    for marker in ("\n[", "\n{"):
+        start = payload.find(marker)
+        if start != -1:
+            candidates.append(payload[start + 1 :].strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
     try:
         return json.loads(payload)
     except json.JSONDecodeError as e:

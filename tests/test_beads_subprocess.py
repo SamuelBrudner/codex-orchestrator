@@ -99,7 +99,6 @@ def test_bd_sync_ignores_non_json_output(tmp_path: Path, monkeypatch) -> None:
 
     assert out == {}
 
-
 def test_bd_ready_uses_explicit_limit(tmp_path: Path, monkeypatch) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -182,3 +181,35 @@ def test_bd_show_infers_parent_from_parent_child_dependency(tmp_path: Path, monk
     issue = beads_subprocess.bd_show(repo_root=repo_root, issue_id="bd-1")
 
     assert issue.parent_id == "bd-epic"
+
+
+def test_bd_ready_tolerates_warning_preamble_before_json(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        assert args == [
+            "ready",
+            "--json",
+            "--limit",
+            str(beads_subprocess.DEFAULT_BD_READY_LIMIT),
+        ]
+        assert cwd == repo_root
+        return "\n".join(
+            [
+                "Warning: daemon failed to start",
+                "LEGACY DATABASE DETECTED!",
+                "",
+                '[{"id":"bd-1","title":"Test bead","labels":["infra"],"issue_type":"task"}]',
+            ]
+        )
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    out = beads_subprocess.bd_ready(repo_root=repo_root)
+
+    assert len(out) == 1
+    assert out[0].bead_id == "bd-1"
+    assert out[0].title == "Test bead"
+    assert out[0].labels == ("infra",)
+    assert out[0].issue_type == "task"

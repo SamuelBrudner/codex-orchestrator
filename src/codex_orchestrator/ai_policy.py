@@ -9,7 +9,7 @@ class AiPolicyError(ValueError):
     pass
 
 
-REQUIRED_CODEX_MODEL = "gpt-5.3-codex"
+REQUIRED_CODEX_MODEL = "gpt-5.4"
 REQUIRED_REASONING_EFFORT = "xhigh"
 
 
