@@ -165,6 +165,41 @@ def test_write_final_review_creates_deterministic_artifacts(tmp_path: Path) -> N
             "next_action": "Inspect failing bead details in logs; fix and re-run.",
         },
     )
+    _write_json(
+        paths.repo_ai_summary_json_path(run_id, "repo_a"),
+        {
+            "schema_version": 1,
+            "run_id": run_id,
+            "repo_id": "repo_a",
+            "repo_path": "/tmp/repo_a",
+            "source_log_path": "final_codex_review.repo_a.json",
+            "json_path": paths.repo_ai_summary_json_path(run_id, "repo_a").name,
+            "md_path": paths.repo_ai_summary_md_path(run_id, "repo_a").name,
+            "generated_at": "2025-01-01T00:09:00+00:00",
+            "summary_markdown": "\n".join(
+                [
+                    "**Completed Work**",
+                    "- Closed `bd-1` and isolated the `bd-2` failure.",
+                    "",
+                    "**Why It Matters**",
+                    "- The run made one safe change while preserving a clear next step.",
+                    "",
+                    "**Validation**",
+                    "- `pytest -q` passed for `bd-1` and failed for `bd-2`.",
+                    "",
+                    "**Human Review**",
+                    "- Decide whether `b.py` should be retried or deprioritized.",
+                    "",
+                    "**Next Steps**",
+                    "- Fix `bd-2` and rerun the deck.",
+                ]
+            ),
+        },
+    )
+    paths.repo_ai_summary_md_path(run_id, "repo_a").write_text(
+        "# AI Summary (repo_a)\n\nplaceholder\n",
+        encoding="utf-8",
+    )
 
     ai_settings = AiSettings(model="gpt-5.4", reasoning_effort="xhigh")
     review_1 = build_final_review(paths, run_id=run_id, ai_settings=ai_settings)
@@ -178,9 +213,12 @@ def test_write_final_review_creates_deterministic_artifacts(tmp_path: Path) -> N
 
     loaded = json.loads(artifacts.json_path.read_text(encoding="utf-8"))
     assert loaded["run_id"] == run_id
+    assert loaded["summary"]["repos_with_ai_summary"] == 1
     assert [r["repo_id"] for r in loaded["repos"]] == ["repo_a", "repo_b"]
     assert loaded["repos"][0]["deck"]["planned_bead_ids"] == ["bd-1", "bd-2"]
     assert [b["bead_id"] for b in loaded["repos"][0]["beads"]] == ["bd-1", "bd-2"]
+    assert loaded["repos"][0]["ai_summary"]["md_path"] == "repo_a.ai_summary.md"
+    assert "#### AI Summary" in artifacts.md_path.read_text(encoding="utf-8")
 
 
 def test_build_final_review_prefers_summary_planned_scope_over_overwritten_deck(tmp_path: Path) -> None:
@@ -295,7 +333,7 @@ def test_orchestrator_cycle_writes_final_review_on_end(tmp_path: Path) -> None:
     assert paths.final_review_md_path(run_id).exists()
 
 
-def _write_fake_codex(bin_dir: Path, *, writes_diff: bool) -> None:
+def _write_fake_codex(bin_dir: Path, *, writes_diff: bool, stdout_text: str = "review") -> None:
     script = bin_dir / "codex"
     lines = [
         "#!/usr/bin/env python3",
@@ -310,7 +348,7 @@ def _write_fake_codex(bin_dir: Path, *, writes_diff: bool) -> None:
         lines.append("    Path('oops.txt').write_text('oops\\n', encoding='utf-8')")
     lines.extend(
         [
-            "    print('review')",
+            f"    print({stdout_text!r})",
             "    return 0",
             "",
             "if __name__ == '__main__':",
@@ -388,7 +426,25 @@ def test_review_only_codex_pass_allows_clean_stdout_only(tmp_path: Path, monkeyp
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    _write_fake_codex(bin_dir, writes_diff=False)
+    review_markdown = "\n".join(
+        [
+            "**Completed Work**",
+            "- Reviewed the repo run report.",
+            "",
+            "**Why It Matters**",
+            "- It gives the operator a contentful closeout.",
+            "",
+            "**Validation**",
+            "- No files changed during review.",
+            "",
+            "**Human Review**",
+            "- Check whether the follow-up bead should be opened.",
+            "",
+            "**Next Steps**",
+            "- Refresh the final review artifact.",
+        ]
+    )
+    _write_fake_codex(bin_dir, writes_diff=False, stdout_text=review_markdown)
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
 
     logs = run_review_only_codex_pass(
@@ -400,4 +456,64 @@ def test_review_only_codex_pass_allows_clean_stdout_only(tmp_path: Path, monkeyp
     assert len(logs) == 1
     assert logs[0].repo_id == "repo_x"
     assert logs[0].path.exists()
+    assert logs[0].summary_json_path is not None
+    assert logs[0].summary_md_path is not None
+    assert logs[0].summary_json_path.exists()
+    assert logs[0].summary_md_path.exists()
+    summary_payload = json.loads(logs[0].summary_json_path.read_text(encoding="utf-8"))
+    assert summary_payload["summary_markdown"] == review_markdown
+    final_review = json.loads(paths.final_review_json_path(run_id).read_text(encoding="utf-8"))
+    assert final_review["summary"]["repos_with_ai_summary"] == 1
+    assert final_review["repos"][0]["ai_summary"]["summary_markdown"] == review_markdown
+    assert "#### AI Summary" in paths.final_review_md_path(run_id).read_text(encoding="utf-8")
     assert _git(repo_root, "status", "--porcelain") == ""
+
+
+def test_review_only_codex_pass_skips_repo_ai_summary_before_run_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _git(repo_root, "init", "-b", "main")
+    _git(repo_root, "config", "user.name", "Test")
+    _git(repo_root, "config", "user.email", "test@example.com")
+    (repo_root / "README.md").write_text("hi\n", encoding="utf-8")
+    _git(repo_root, "add", "-A")
+    _git(repo_root, "commit", "-m", "init")
+
+    cache_dir = tmp_path / "cache"
+    paths = OrchestratorPaths(cache_dir=cache_dir)
+    run_id = "20250101-000000-deadbeef"
+    _write_json(
+        paths.repo_summary_path(run_id, "repo_x"),
+        {
+            "schema_version": 1,
+            "run_id": run_id,
+            "repo_id": "repo_x",
+            "repo_path": repo_root.as_posix(),
+            "skipped": False,
+        },
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_codex(bin_dir, writes_diff=False, stdout_text="**Completed Work**\n- Interim review.")
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+
+    logs = run_review_only_codex_pass(
+        paths,
+        run_id=run_id,
+        ai_settings=AiSettings(model="gpt-5.4", reasoning_effort="xhigh"),
+        timeout_seconds=5.0,
+        log_stem="cadence_codex_review",
+        log_suffix="tick2",
+        prompt_label="cadence",
+    )
+
+    assert len(logs) == 1
+    assert logs[0].summary_json_path is None
+    assert logs[0].summary_md_path is None
+    assert not paths.repo_ai_summary_json_path(run_id, "repo_x").exists()
+    assert not paths.repo_ai_summary_md_path(run_id, "repo_x").exists()
+    assert not paths.final_review_json_path(run_id).exists()

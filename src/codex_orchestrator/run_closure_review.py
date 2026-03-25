@@ -18,9 +18,9 @@ from codex_orchestrator.git_subprocess import (
     git_status_filtered,
     resolve_dirty_ignore_globs,
 )
-from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import PlannerError, read_run_deck
+from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
 
 
 class RunClosureReviewError(RuntimeError):
@@ -37,6 +37,8 @@ class RunClosureArtifacts:
 class CodexReviewLog:
     repo_id: str
     path: Path
+    summary_json_path: Path | None = None
+    summary_md_path: Path | None = None
 
 
 def _read_json(path: Path) -> Any:
@@ -79,6 +81,23 @@ def _load_repo_summaries(paths: OrchestratorPaths, *, run_id: str) -> list[dict[
     return summaries
 
 
+def _load_repo_ai_summaries(paths: OrchestratorPaths, *, run_id: str) -> dict[str, dict[str, Any]]:
+    run_dir = paths.run_dir(run_id)
+    summaries: dict[str, dict[str, Any]] = {}
+    for summary_path in sorted(run_dir.glob("*.ai_summary.json")):
+        payload = _read_json(summary_path)
+        if not isinstance(payload, dict):
+            continue
+        payload_run_id = payload.get("run_id")
+        repo_id = payload.get("repo_id")
+        if payload_run_id != run_id:
+            continue
+        if not isinstance(repo_id, str) or not repo_id.strip():
+            continue
+        summaries[repo_id.strip()] = payload
+    return summaries
+
+
 def _ensure_run_summary_with_final_review(
     paths: OrchestratorPaths,
     *,
@@ -116,10 +135,12 @@ def build_final_review(
         run_meta = None
 
     repo_summaries = _load_repo_summaries(paths, run_id=run_id)
+    repo_ai_summaries = _load_repo_ai_summaries(paths, run_id=run_id)
 
     repos_out: list[dict[str, Any]] = []
     total_attempted = 0
     total_closed = 0
+    repos_with_ai_summary = 0
     for summary in repo_summaries:
         repo_id = str(summary.get("repo_id") or "")
         deck_path_raw = summary.get("deck_path")
@@ -192,6 +213,20 @@ def build_final_review(
         else:
             audits_out = [audits_by_id[k] for k in sorted(audits_by_id)]
 
+        ai_summary_payload = repo_ai_summaries.get(repo_id)
+        ai_summary_out: dict[str, Any] | None = None
+        if isinstance(ai_summary_payload, dict):
+            summary_markdown = ai_summary_payload.get("summary_markdown")
+            if isinstance(summary_markdown, str) and summary_markdown.strip():
+                repos_with_ai_summary += 1
+                ai_summary_out = {
+                    "json_path": ai_summary_payload.get("json_path"),
+                    "md_path": ai_summary_payload.get("md_path"),
+                    "source_log_path": ai_summary_payload.get("source_log_path"),
+                    "generated_at": ai_summary_payload.get("generated_at"),
+                    "summary_markdown": summary_markdown.strip(),
+                }
+
         repos_out.append(
             {
                 "repo_id": repo_id,
@@ -212,6 +247,7 @@ def build_final_review(
                 "beads": audits_out,
                 "planning_skipped_beads": summary.get("planning_skipped_beads", []),
                 "run_report_path": summary.get("run_report_path"),
+                "ai_summary": ai_summary_out,
                 "ai_settings": summary.get("ai_settings"),
                 "codex_command": summary.get("codex_command"),
                 "codex_argv": summary.get("codex_argv"),
@@ -240,6 +276,7 @@ def build_final_review(
             "repos_total": len(repos_out),
             "beads_attempted_total": total_attempted,
             "beads_closed_total": total_closed,
+            "repos_with_ai_summary": repos_with_ai_summary,
         },
         "repos": repos_out,
     }
@@ -270,10 +307,12 @@ def format_final_review_md(review: Mapping[str, Any]) -> str:
         repos_total = summary.get("repos_total")
         beads_attempted = summary.get("beads_attempted_total")
         beads_closed = summary.get("beads_closed_total")
+        repos_with_ai_summary = summary.get("repos_with_ai_summary")
         lines.append("## Totals")
         lines.append(f"- Repos: {repos_total}")
         lines.append(f"- Beads attempted: {beads_attempted}")
         lines.append(f"- Beads closed: {beads_closed}")
+        lines.append(f"- Repos with AI summary: {repos_with_ai_summary}")
         lines.append("")
 
     repos = review.get("repos")
@@ -309,8 +348,22 @@ def format_final_review_md(review: Mapping[str, Any]) -> str:
                 parts = [f"{k}={outcomes[k]}" for k in sorted(outcomes)]
                 lines.append(f"- Bead outcomes: {' '.join(parts)}")
 
+            ai_summary = repo.get("ai_summary")
+            if isinstance(ai_summary, dict):
+                ai_summary_path = ai_summary.get("md_path")
+                if isinstance(ai_summary_path, str) and ai_summary_path.strip():
+                    lines.append(f"- AI summary: {ai_summary_path}")
+
             if isinstance(next_action, str) and next_action.strip():
                 lines.append(f"- Next action: {next_action}")
+
+            if isinstance(ai_summary, dict):
+                summary_markdown = ai_summary.get("summary_markdown")
+                if isinstance(summary_markdown, str) and summary_markdown.strip():
+                    lines.append("")
+                    lines.append("#### AI Summary")
+                    lines.append("")
+                    lines.extend(summary_markdown.strip().splitlines())
             lines.append("")
 
     lines.append("## Policy Notes")
@@ -326,11 +379,12 @@ def write_final_review(
     *,
     run_id: str,
     ai_settings: AiSettings | None = None,
+    force: bool = False,
 ) -> RunClosureArtifacts:
     json_path = paths.final_review_json_path(run_id)
     md_path = paths.final_review_md_path(run_id)
 
-    if json_path.exists() and md_path.exists():
+    if not force and json_path.exists() and md_path.exists():
         _ensure_run_summary_with_final_review(
             paths,
             run_id=run_id,
@@ -340,9 +394,9 @@ def write_final_review(
         return RunClosureArtifacts(json_path=json_path, md_path=md_path)
 
     review = build_final_review(paths, run_id=run_id, ai_settings=ai_settings)
-    if not json_path.exists():
+    if force or not json_path.exists():
         write_json_atomic(json_path, review)
-    if not md_path.exists():
+    if force or not md_path.exists():
         _write_text_atomic(md_path, format_final_review_md(review))
 
     _ensure_run_summary_with_final_review(
@@ -366,18 +420,73 @@ def _review_only_prompt(*, run_id: str, repo_id: str, label: str | None = None) 
             "Hard constraints:",
             "- Do NOT modify, create, or delete any files.",
             "- Do NOT run shell commands.",
-            "- Output a concise review summary to stdout only.",
+            "- Output Markdown to stdout only.",
+            "- Do not include a document title or code fences.",
             "",
             f"Context: RUN_ID={run_id} repo_id={repo_id}",
             "",
-            "If docs/runs/<RUN_ID>.md exists in this repo, use it as the primary source. Otherwise, summarize from git history on the current branch.",
+            "If docs/runs/<RUN_ID>.md exists in this repo, use it as the primary source.",
+            "Otherwise, summarize from the repo run report, changed files, tests, and nearby docs that you can inspect without shell access.",
             "",
             "Deliverables:",
-            "- What was attempted / completed",
-            "- Any failures or skips (and why)",
-            "- Suggested follow-ups (as bullets)",
+            "- Use these exact bold section labels in this order: **Completed Work**, **Why It Matters**, **Validation**, **Human Review**, **Next Steps**.",
+            "- Make the summary contentful: explain what changed and why it matters, not just counts or file lists.",
+            "- Mention concrete beads, files, validations, and follow-ups when they are available.",
+            "- If a section has nothing substantive, write `- None.`",
         ]
     ).rstrip("\n")
+
+
+def _fallback_ai_summary_markdown() -> str:
+    return "\n".join(
+        [
+            "**Completed Work**",
+            "- No summary was produced.",
+            "",
+            "**Why It Matters**",
+            "- Not available.",
+            "",
+            "**Validation**",
+            "- Not available.",
+            "",
+            "**Human Review**",
+            "- Not available.",
+            "",
+            "**Next Steps**",
+            "- Inspect the raw review log.",
+        ]
+    )
+
+
+def _normalize_ai_summary_markdown(stdout: str) -> str:
+    text = stdout.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].startswith("```"):
+            text = "\n".join(lines[1:-1]).strip()
+    if text.startswith("# "):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:]).strip()
+    return text or _fallback_ai_summary_markdown()
+
+
+def _format_repo_ai_summary_md(payload: Mapping[str, Any]) -> str:
+    repo_id = str(payload.get("repo_id") or "<unknown>")
+    run_id = str(payload.get("run_id") or "<unknown>")
+    generated_at = payload.get("generated_at")
+    source_log_path = payload.get("source_log_path")
+    summary_markdown = str(payload.get("summary_markdown") or "").strip() or _fallback_ai_summary_markdown()
+
+    lines = [
+        f"# AI Summary ({repo_id})",
+        "",
+        f"- RUN_ID: `{run_id}`",
+        f"- Generated at: {generated_at if isinstance(generated_at, str) and generated_at else '<unknown>'}",
+        f"- Source log: `{source_log_path if isinstance(source_log_path, str) and source_log_path else '<unknown>'}`",
+        "",
+        summary_markdown,
+    ]
+    return "\n".join(lines).rstrip("\n") + "\n"
 
 
 def _load_dirty_ignore_globs(
@@ -405,6 +514,7 @@ def run_review_only_codex_pass(
 ) -> tuple[CodexReviewLog, ...]:
     run_dir = paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
+    finalized_run = paths.run_end_path(run_id).exists()
 
     logs: list[CodexReviewLog] = []
     dirty_ignore_by_repo = _load_dirty_ignore_globs(repo_config_path)
@@ -484,5 +594,35 @@ def run_review_only_codex_pass(
             raise RunClosureReviewError(
                 f"Policy violation: final Codex review produced a diff for {repo_id} ({changed})."
             )
+
+        summary_json_path: Path | None = None
+        summary_md_path: Path | None = None
+        if finalized_run:
+            summary_markdown = _normalize_ai_summary_markdown(invocation.stdout)
+            summary_json_path = paths.repo_ai_summary_json_path(run_id, repo_id)
+            summary_md_path = paths.repo_ai_summary_md_path(run_id, repo_id)
+            summary_payload = {
+                "schema_version": 1,
+                "run_id": run_id,
+                "repo_id": repo_id,
+                "repo_path": repo_root.as_posix(),
+                "source_log_path": log_path.name,
+                "json_path": summary_json_path.name,
+                "md_path": summary_md_path.name,
+                "generated_at": invocation.finished_at.isoformat(),
+                "summary_markdown": summary_markdown,
+            }
+            write_json_atomic(summary_json_path, summary_payload)
+            _write_text_atomic(summary_md_path, _format_repo_ai_summary_md(summary_payload))
+
+        logs[-1] = CodexReviewLog(
+            repo_id=repo_id,
+            path=log_path,
+            summary_json_path=summary_json_path,
+            summary_md_path=summary_md_path,
+        )
+
+    if finalized_run:
+        write_final_review(paths, run_id=run_id, ai_settings=ai_settings, force=True)
 
     return tuple(logs)

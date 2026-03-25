@@ -96,6 +96,12 @@ class OrchestratorPaths:
     def repo_summary_path(self, run_id: str, repo_id: str) -> Path:
         return self.run_dir(run_id) / f"{repo_id}.summary.json"
 
+    def repo_ai_summary_json_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.ai_summary.json"
+
+    def repo_ai_summary_md_path(self, run_id: str, repo_id: str) -> Path:
+        return self.run_dir(run_id) / f"{repo_id}.ai_summary.md"
+
     def run_deck_path(self, run_id: str, repo_id: str, *, day: date | datetime) -> Path:
         if isinstance(day, datetime):
             day = day.date()
