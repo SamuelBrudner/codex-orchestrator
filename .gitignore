@@ -214,6 +214,7 @@ config/repos.toml
 config/orchestrator.toml
 config/bead_contracts/home_science.toml
 config/bead_contracts/lab_tracker.toml
+config/bead_contracts/uloborus_web_analysis.toml
 .beads/daemon-error
 .beads/last-touched
 .beads/export-state/
