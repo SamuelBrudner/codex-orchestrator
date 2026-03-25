@@ -1,0 +1,11 @@
+# Contract overlay for `BilateralOdorFlowRl`.
+#
+# `[defaults]` applies to all beads unless overridden.
+# `[beads."<BEAD_ID>"]` defines per-bead overrides (keyed by Beads issue id).
+
+[defaults]
+time_budget_minutes = 45
+validation_commands = ["pytest -q"]
+env = "bilateralodorflowrl"
+allow_env_creation = false
+requires_notebook_execution = false
