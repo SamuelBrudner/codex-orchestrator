@@ -989,6 +989,58 @@ def _merge_records_by_keys(
     return merged
 
 
+def _is_skipped_bead_outcome(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("skipped")
+
+
+def _merge_bead_audits(
+    existing: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    index_by_bead_id: dict[str, int] = {}
+
+    for item in existing:
+        record = dict(item)
+        bead_id = str(record.get("bead_id") or "").strip()
+        if not bead_id:
+            merged.append(record)
+            continue
+        index_by_bead_id[bead_id] = len(merged)
+        merged.append(record)
+
+    for item in current:
+        record = dict(item)
+        bead_id = str(record.get("bead_id") or "").strip()
+        if not bead_id:
+            merged.append(record)
+            continue
+
+        idx = index_by_bead_id.get(bead_id)
+        if idx is None:
+            index_by_bead_id[bead_id] = len(merged)
+            merged.append(record)
+            continue
+
+        prior = dict(merged[idx])
+        merged_record = dict(prior)
+        merged_record.update(record)
+
+        prior_outcome = prior.get("outcome")
+        current_outcome = record.get("outcome")
+        if _is_skipped_bead_outcome(current_outcome) and isinstance(prior_outcome, str):
+            if prior_outcome and not _is_skipped_bead_outcome(prior_outcome):
+                merged_record["outcome"] = prior_outcome
+                if "detail" in prior:
+                    merged_record["detail"] = prior.get("detail")
+                else:
+                    merged_record.pop("detail", None)
+
+        merged[idx] = merged_record
+
+    return merged
+
+
 def _merge_notebook_refactors(existing: Any, current: Any) -> dict[str, list[str]]:
     existing_map = existing if isinstance(existing, dict) else {}
     current_map = current if isinstance(current, dict) else {}
@@ -1072,10 +1124,9 @@ def _merge_repo_summary(
     if existing is None:
         return current
 
-    merged_beads = _merge_records_by_keys(
+    merged_beads = _merge_bead_audits(
         _summary_list_of_dicts(existing.get("beads")),
         _summary_list_of_dicts(current.get("beads")),
-        key_fields=("bead_id",),
     )
     merged_planning_skipped = _merge_records_by_keys(
         _summary_list_of_dicts(existing.get("planning_skipped_beads")),

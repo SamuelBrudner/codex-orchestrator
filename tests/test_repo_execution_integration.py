@@ -497,7 +497,14 @@ def test_merge_repo_summary_preserves_cumulative_run_state_across_idle_ticks() -
         "repo_id": "repo_x",
         "beads_attempted": 0,
         "beads_closed": 0,
-        "beads": [],
+        "beads": [
+            {
+                "bead_id": "bd-1",
+                "title": "One",
+                "outcome": "skipped_closed",
+                "detail": "Issue already closed; skipping per conservative policy.",
+            }
+        ],
         "planning_skipped_beads": [],
         "failures": [],
         "follow_ups": [],
