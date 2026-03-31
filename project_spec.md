@@ -186,7 +186,10 @@ Rationale: long enough for meaningful work; short enough to checkpoint frequentl
 
 On the first trigger of a run (per repo):
 
-1. Initialize Beads (`bd init --quiet`)
+1. Prepare Beads workspace safely:
+   * If a healthy database already exists, reuse it.
+   * If tracked `.beads/issues.jsonl` exists without an active database, prefer `bd bootstrap` (or `bd init --from-jsonl --quiet` on older compatible CLIs).
+   * Use plain `bd init --quiet` only for genuinely empty repos with no tracked Beads state.
 2. Query ready issues (`bd ready --json`)
 3. Detect modified/untracked notebooks
 4. Create or tag Beads issues for notebook-refactor work

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,15 +49,47 @@ class BdIssueSummary:
     status: str
 
 
-def _run_bd(
+@dataclass(frozen=True, slots=True)
+class BdCapabilities:
+    version: str | None
+    workspace_layout: str
+    supports_bootstrap: bool
+    supports_init_from_jsonl: bool
+    supports_sync: bool
+    supports_structured_doctor_output: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BdDoctorResult:
+    status: str
+    capabilities: BdCapabilities
+    overall_ok: bool | None = None
+    failed_checks: int = 0
+    raw_output: str = ""
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BdSyncResult:
+    status: str
+    capabilities: BdCapabilities
+    raw_output: str = ""
+    message: str | None = None
+
+
+_HELP_COMMAND_RE = re.compile(r"(?m)^  ([A-Za-z0-9_-]+)\b")
+_ACTIVE_WORKSPACE_LAYOUTS = frozenset({"legacy_db", "modern_embeddeddolt"})
+_PREPARABLE_WORKSPACE_LAYOUTS = frozenset({"missing", "empty_beads_dir", "jsonl_only"})
+
+
+def _run_bd_completed(
     args: Sequence[str],
     *,
     cwd: Path,
     timeout_seconds: float = 60.0,
-    ok_exit_codes: Sequence[int] = (0,),
-) -> str:
+) -> subprocess.CompletedProcess[str]:
     try:
-        completed = subprocess.run(
+        return subprocess.run(
             ["bd", *args],
             cwd=cwd,
             capture_output=True,
@@ -69,13 +102,140 @@ def _run_bd(
     except subprocess.TimeoutExpired as e:
         raise BdCliError(f"bd {' '.join(args)} timed out after {timeout_seconds:.0f}s.") from e
 
-    if completed.returncode not in set(int(code) for code in ok_exit_codes):
-        stderr = (completed.stderr or "").strip()
-        stdout = (completed.stdout or "").strip()
-        details = stderr or stdout or "<no output>"
-        raise BdCliError(f"bd {' '.join(args)} failed (exit={completed.returncode}): {details}")
 
+def _completed_output(completed: subprocess.CompletedProcess[str]) -> str:
     return completed.stdout or ""
+
+
+def _completed_details(completed: subprocess.CompletedProcess[str]) -> str:
+    stderr = (completed.stderr or "").strip()
+    stdout = (completed.stdout or "").strip()
+    return stderr or stdout or "<no output>"
+
+
+def _run_bd(
+    args: Sequence[str],
+    *,
+    cwd: Path,
+    timeout_seconds: float = 60.0,
+    ok_exit_codes: Sequence[int] = (0,),
+) -> str:
+    completed = _run_bd_completed(args, cwd=cwd, timeout_seconds=timeout_seconds)
+
+    if completed.returncode not in set(int(code) for code in ok_exit_codes):
+        raise BdCliError(
+            f"bd {' '.join(args)} failed (exit={completed.returncode}): {_completed_details(completed)}"
+        )
+
+    return _completed_output(completed)
+
+
+def _read_bd_help(*, repo_root: Path, args: Sequence[str] = ()) -> str:
+    try:
+        return _run_bd([*args, "--help"], cwd=repo_root, timeout_seconds=10.0)
+    except BdCliError:
+        return ""
+
+
+def _read_bd_version(*, repo_root: Path) -> str | None:
+    for args in (["version"], ["--version"]):
+        try:
+            payload = _run_bd(args, cwd=repo_root, timeout_seconds=10.0).strip()
+        except BdCliError:
+            continue
+        if payload:
+            return payload.splitlines()[0].strip()
+    return None
+
+
+def _help_includes_command(help_text: str, command: str) -> bool:
+    return any(match.group(1) == command for match in _HELP_COMMAND_RE.finditer(help_text))
+
+
+def _detect_workspace_layout(repo_root: Path) -> str:
+    beads_dir = repo_root / ".beads"
+    if not beads_dir.exists():
+        return "missing"
+    if not beads_dir.is_dir():
+        return "unknown"
+
+    legacy_db = beads_dir / "beads.db"
+    modern_db = beads_dir / "embeddeddolt"
+    issues_jsonl = beads_dir / "issues.jsonl"
+
+    has_legacy_db = legacy_db.exists()
+    has_modern_db = modern_db.exists()
+    has_jsonl = issues_jsonl.exists()
+
+    if has_legacy_db and has_modern_db:
+        return "conflict"
+    if has_modern_db:
+        return "modern_embeddeddolt"
+    if has_legacy_db:
+        return "legacy_db"
+    if has_jsonl:
+        return "jsonl_only"
+
+    if not any(beads_dir.iterdir()):
+        return "empty_beads_dir"
+    return "unknown"
+
+
+def bd_detect_capabilities(*, repo_root: Path) -> BdCapabilities:
+    help_text = _read_bd_help(repo_root=repo_root)
+    init_help_text = _read_bd_help(repo_root=repo_root, args=("init",))
+    return BdCapabilities(
+        version=_read_bd_version(repo_root=repo_root),
+        workspace_layout=_detect_workspace_layout(repo_root),
+        supports_bootstrap=_help_includes_command(help_text, "bootstrap"),
+        supports_init_from_jsonl="--from-jsonl" in init_help_text,
+        supports_sync=_help_includes_command(help_text, "sync"),
+        supports_structured_doctor_output=None,
+    )
+
+
+def _workspace_is_active(capabilities: BdCapabilities) -> bool:
+    return capabilities.workspace_layout in _ACTIVE_WORKSPACE_LAYOUTS
+
+
+def _workspace_is_preparable(capabilities: BdCapabilities) -> bool:
+    return capabilities.workspace_layout in _PREPARABLE_WORKSPACE_LAYOUTS
+
+
+def _workspace_skip_reason(capabilities: BdCapabilities) -> str:
+    layout = capabilities.workspace_layout
+    if layout == "jsonl_only":
+        return "tracked_jsonl_without_active_database"
+    if layout == "missing":
+        return "no_beads_workspace"
+    if layout == "empty_beads_dir":
+        return "empty_beads_workspace"
+    return f"workspace_layout={layout}"
+
+
+def _workspace_error(capabilities: BdCapabilities, *, repo_root: Path) -> BdCliError:
+    beads_dir = repo_root / ".beads"
+    if capabilities.workspace_layout == "conflict":
+        return BdCliError(
+            f"bd workspace compatibility error for {repo_root}: both legacy .beads/beads.db and modern "
+            f".beads/embeddeddolt are present; resolve the conflict manually before rerunning."
+        )
+
+    if capabilities.workspace_layout == "unknown":
+        entries = ", ".join(sorted(p.name for p in beads_dir.iterdir())) or "<empty>"
+        return BdCliError(
+            f"bd workspace compatibility error for {repo_root}: unrecognized .beads layout ({entries}). "
+            "Refusing to run plain 'bd init --quiet' because it could create an empty database and hide "
+            "existing issue data. Use a supported layout (legacy beads.db, tracked issues.jsonl, or "
+            "embedded Dolt) and rerun."
+        )
+
+    return BdCliError(f"bd workspace compatibility error for {repo_root}: unsupported layout {capabilities.workspace_layout!r}")
+
+
+def _detect_unknown_command(error: BdCliError, command: str) -> bool:
+    msg = str(error).lower()
+    return f'unknown command "{command}"' in msg or f"unknown command '{command}'" in msg
 
 
 def _parse_json_output(stdout: str) -> Any:
@@ -215,10 +375,46 @@ def _parse_single_issue(data: Any, *, context: str) -> BdIssue:
     return _parse_issue(data, context=context)
 
 
+def bd_prepare_workspace(*, repo_root: Path) -> BdCapabilities:
+    capabilities = bd_detect_capabilities(repo_root=repo_root)
+    if _workspace_is_active(capabilities):
+        return capabilities
+
+    if not _workspace_is_preparable(capabilities):
+        raise _workspace_error(capabilities, repo_root=repo_root)
+
+    if capabilities.workspace_layout == "jsonl_only":
+        bootstrap_error: BdCliError | None = None
+        if capabilities.supports_bootstrap:
+            try:
+                _run_bd(["bootstrap"], cwd=repo_root)
+            except BdCliError as e:
+                bootstrap_error = e
+        if not capabilities.supports_bootstrap or bootstrap_error is not None:
+            if capabilities.supports_init_from_jsonl:
+                _run_bd(["init", "--from-jsonl", "--quiet"], cwd=repo_root)
+            elif bootstrap_error is not None:
+                raise bootstrap_error
+            else:
+                raise BdCliError(
+                    f"bd workspace compatibility error for {repo_root}: found tracked .beads/issues.jsonl but "
+                    "the installed bd does not support 'bootstrap' or 'init --from-jsonl'. Upgrade bd or "
+                    "migrate the workspace manually before rerunning."
+                )
+    else:
+        _run_bd(["init", "--quiet"], cwd=repo_root)
+
+    prepared = bd_detect_capabilities(repo_root=repo_root)
+    if _workspace_is_active(prepared):
+        return prepared
+    raise BdCliError(
+        f"bd workspace preparation did not produce a recognized active database for {repo_root} "
+        f"(layout={prepared.workspace_layout!r})."
+    )
+
+
 def bd_init(*, repo_root: Path) -> None:
-    if (repo_root / ".beads" / "beads.db").exists():
-        return
-    _run_bd(["init", "--quiet"], cwd=repo_root)
+    bd_prepare_workspace(repo_root=repo_root)
 
 
 def bd_ready(*, repo_root: Path, limit: int = DEFAULT_BD_READY_LIMIT) -> list[ReadyBead]:
@@ -265,28 +461,143 @@ def bd_ready(*, repo_root: Path, limit: int = DEFAULT_BD_READY_LIMIT) -> list[Re
     return out
 
 
-def bd_doctor(*, repo_root: Path) -> dict[str, Any]:
-    # `bd doctor --json` exits with 1 when `overall_ok=false`, but still emits valid JSON.
-    data = _parse_json_output(_run_bd(["doctor", "--json"], cwd=repo_root, ok_exit_codes=(0, 1)))
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise BdCliError(f"bd doctor --json: expected an object, got {type(data).__name__}")
-    return data
-
-
-def bd_sync(*, repo_root: Path) -> dict[str, Any]:
-    # Some bd versions accept `--json` but still emit human-readable progress text on stdout,
-    # which is not parseable JSON. Treat non-JSON output as a successful no-op and return {}.
+def bd_doctor(*, repo_root: Path) -> BdDoctorResult:
     try:
-        data = _parse_json_output(_run_bd(["sync", "--json"], cwd=repo_root))
+        capabilities = bd_detect_capabilities(repo_root=repo_root)
+    except BdCliError as e:
+        return BdDoctorResult(
+            status="error",
+            capabilities=BdCapabilities(
+                version=None,
+                workspace_layout="unknown",
+                supports_bootstrap=False,
+                supports_init_from_jsonl=False,
+                supports_sync=False,
+                supports_structured_doctor_output=None,
+            ),
+            message=str(e),
+        )
+
+    if capabilities.workspace_layout in {"missing", "empty_beads_dir", "jsonl_only"}:
+        return BdDoctorResult(
+            status="skipped",
+            capabilities=capabilities,
+            message=_workspace_skip_reason(capabilities),
+        )
+    if capabilities.workspace_layout not in _ACTIVE_WORKSPACE_LAYOUTS:
+        return BdDoctorResult(
+            status="error",
+            capabilities=capabilities,
+            message=_workspace_error(capabilities, repo_root=repo_root).args[0],
+        )
+
+    try:
+        stdout = _run_bd(["doctor", "--json"], cwd=repo_root, ok_exit_codes=(0, 1))
+    except BdCliError as e:
+        if _detect_unknown_command(e, "doctor"):
+            return BdDoctorResult(
+                status="unsupported",
+                capabilities=capabilities,
+                message="doctor_command_unavailable",
+            )
+        return BdDoctorResult(status="error", capabilities=capabilities, message=str(e))
+
+    try:
+        data = _parse_json_output(stdout)
     except BdCliError:
-        return {}
+        return BdDoctorResult(
+            status="unsupported",
+            capabilities=replace(capabilities, supports_structured_doctor_output=False),
+            raw_output=stdout,
+            message="doctor_json_output_unavailable",
+        )
+
     if data is None:
-        return {}
+        return BdDoctorResult(
+            status="unsupported",
+            capabilities=replace(capabilities, supports_structured_doctor_output=False),
+            raw_output=stdout,
+            message="doctor_json_output_unavailable",
+        )
     if not isinstance(data, dict):
-        return {}
-    return data
+        return BdDoctorResult(
+            status="unsupported",
+            capabilities=replace(capabilities, supports_structured_doctor_output=False),
+            raw_output=stdout,
+            message=f"doctor_json_expected_object_got_{type(data).__name__}",
+        )
+
+    checks = data.get("checks")
+    failed_checks = 0
+    if isinstance(checks, list):
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            status = item.get("status")
+            if isinstance(status, str) and status != "ok":
+                failed_checks += 1
+    overall_ok = data.get("overall_ok")
+    return BdDoctorResult(
+        status="warn" if overall_ok is False else "ok",
+        capabilities=replace(capabilities, supports_structured_doctor_output=True),
+        overall_ok=bool(overall_ok) if isinstance(overall_ok, bool) else None,
+        failed_checks=failed_checks,
+        raw_output=stdout,
+    )
+
+
+def bd_sync(*, repo_root: Path) -> BdSyncResult:
+    try:
+        capabilities = bd_detect_capabilities(repo_root=repo_root)
+    except BdCliError as e:
+        return BdSyncResult(
+            status="error",
+            capabilities=BdCapabilities(
+                version=None,
+                workspace_layout="unknown",
+                supports_bootstrap=False,
+                supports_init_from_jsonl=False,
+                supports_sync=False,
+                supports_structured_doctor_output=None,
+            ),
+            message=str(e),
+        )
+
+    if not capabilities.supports_sync:
+        return BdSyncResult(
+            status="unsupported",
+            capabilities=capabilities,
+            message="sync_command_unavailable",
+        )
+    if capabilities.workspace_layout in {"missing", "empty_beads_dir", "jsonl_only"}:
+        return BdSyncResult(
+            status="skipped",
+            capabilities=capabilities,
+            message=_workspace_skip_reason(capabilities),
+        )
+    if capabilities.workspace_layout not in _ACTIVE_WORKSPACE_LAYOUTS:
+        return BdSyncResult(
+            status="error",
+            capabilities=capabilities,
+            message=_workspace_error(capabilities, repo_root=repo_root).args[0],
+        )
+
+    try:
+        stdout = _run_bd(["sync", "--json"], cwd=repo_root)
+    except BdCliError as e:
+        if _detect_unknown_command(e, "sync"):
+            return BdSyncResult(
+                status="unsupported",
+                capabilities=capabilities,
+                message="sync_command_unavailable",
+            )
+        return BdSyncResult(status="error", capabilities=capabilities, message=str(e))
+
+    try:
+        _parse_json_output(stdout)
+    except BdCliError:
+        return BdSyncResult(status="ok", capabilities=capabilities, raw_output=stdout)
+    return BdSyncResult(status="ok", capabilities=capabilities, raw_output=stdout)
 
 
 def bd_list(*, repo_root: Path) -> tuple[BdIssueSummary, ...]:

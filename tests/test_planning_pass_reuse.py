@@ -117,7 +117,7 @@ def test_planning_pass_reuses_existing_deck(tmp_path: Path, monkeypatch) -> None
     def _fail(*_args, **_kwargs):
         raise AssertionError("Planning pass recomputed scope unexpectedly.")
 
-    monkeypatch.setattr(planning_pass, "bd_init", _fail)
+    monkeypatch.setattr(planning_pass, "bd_prepare_workspace", _fail)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _fail)
     monkeypatch.setattr(planning_pass, "bd_ready", _fail)
     monkeypatch.setattr(planning_pass, "build_planning_audit", _fail)
@@ -174,7 +174,7 @@ def test_planning_pass_writes_planning_audit_artifacts(
 
     import codex_orchestrator.planning_pass as planning_pass
 
-    def _bd_init(*, repo_root: Path) -> None:
+    def _bd_prepare_workspace(*, repo_root: Path) -> None:
         return None
 
     def _bd_list_ids(*, repo_root: Path) -> set[str]:
@@ -196,7 +196,7 @@ def test_planning_pass_writes_planning_audit_artifacts(
             for cmd in commands
         }
 
-    monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
+    monkeypatch.setattr(planning_pass, "bd_prepare_workspace", _bd_prepare_workspace)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
     monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
@@ -253,7 +253,7 @@ def test_planning_pass_applies_focus_filter_to_run_deck(
 
     import codex_orchestrator.planning_pass as planning_pass
 
-    def _bd_init(*, repo_root: Path) -> None:
+    def _bd_prepare_workspace(*, repo_root: Path) -> None:
         return None
 
     def _bd_list_ids(*, repo_root: Path) -> set[str]:
@@ -288,7 +288,7 @@ def test_planning_pass_applies_focus_filter_to_run_deck(
             for cmd in commands
         }
 
-    monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
+    monkeypatch.setattr(planning_pass, "bd_prepare_workspace", _bd_prepare_workspace)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
     monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
@@ -336,7 +336,7 @@ def test_planning_pass_filters_ready_beads_with_non_open_live_status(
 
     import codex_orchestrator.planning_pass as planning_pass
 
-    def _bd_init(*, repo_root: Path) -> None:
+    def _bd_prepare_workspace(*, repo_root: Path) -> None:
         return None
 
     def _bd_list_ids(*, repo_root: Path) -> set[str]:
@@ -382,7 +382,7 @@ def test_planning_pass_filters_ready_beads_with_non_open_live_status(
             for cmd in commands
         }
 
-    monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
+    monkeypatch.setattr(planning_pass, "bd_prepare_workspace", _bd_prepare_workspace)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
     monkeypatch.setattr(planning_pass, "bd_show", _bd_show)
@@ -426,7 +426,7 @@ def test_planning_pass_fails_without_writing_deck_when_audit_fails(
 
     import codex_orchestrator.planning_pass as planning_pass
 
-    def _bd_init(*, repo_root: Path) -> None:
+    def _bd_prepare_workspace(*, repo_root: Path) -> None:
         return None
 
     def _bd_list_ids(*, repo_root: Path) -> set[str]:
@@ -451,7 +451,7 @@ def test_planning_pass_fails_without_writing_deck_when_audit_fails(
     def _build_audit_fail(*, run_id: str, repo_policy: RepoPolicy) -> dict[str, object]:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
+    monkeypatch.setattr(planning_pass, "bd_prepare_workspace", _bd_prepare_workspace)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
     monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
@@ -501,7 +501,7 @@ def test_planning_pass_creates_planning_audit_issues_once_when_enabled(
     import codex_orchestrator.planning_audit_issues as audit_issues
     import codex_orchestrator.planning_pass as planning_pass
 
-    def _bd_init(*, repo_root: Path) -> None:
+    def _bd_prepare_workspace(*, repo_root: Path) -> None:
         return None
 
     def _bd_list_ids(*, repo_root: Path) -> set[str]:
@@ -586,7 +586,7 @@ def test_planning_pass_creates_planning_audit_issues_once_when_enabled(
             dependents=(),
         )
 
-    monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
+    monkeypatch.setattr(planning_pass, "bd_prepare_workspace", _bd_prepare_workspace)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
     monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
@@ -656,7 +656,7 @@ def test_planning_pass_creates_notebook_refactor_issues_when_enabled(
     import codex_orchestrator.notebook_refactor_issues as nb
     import codex_orchestrator.planning_pass as planning_pass
 
-    def _bd_init(*, repo_root: Path) -> None:
+    def _bd_prepare_workspace(*, repo_root: Path) -> None:
         return None
 
     list_counter = {"n": 0}
@@ -727,7 +727,7 @@ def test_planning_pass_creates_notebook_refactor_issues_when_enabled(
             ),
         )
 
-    monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
+    monkeypatch.setattr(planning_pass, "bd_prepare_workspace", _bd_prepare_workspace)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
     monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)

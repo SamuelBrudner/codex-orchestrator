@@ -12,7 +12,7 @@ from typing import Any
 
 from codex_orchestrator import __version__
 from codex_orchestrator.ai_policy import AiPolicyError, AiSettings, enforce_unattended_ai_policy, load_ai_settings
-from codex_orchestrator.beads_subprocess import BdCliError, bd_init, bd_list_ids, bd_ready
+from codex_orchestrator.beads_subprocess import BdCliError, bd_list_ids, bd_prepare_workspace, bd_ready
 from codex_orchestrator.contract_overlays import (
     ContractOverlay,
     ContractOverlayError,
@@ -1016,7 +1016,7 @@ def _cmd_overlay_dry_run(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        bd_init(repo_root=repo_policy.path)
+        bd_prepare_workspace(repo_root=repo_policy.path)
         known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
         ready_beads = bd_ready(repo_root=repo_policy.path)
     except BdCliError as e:
@@ -1068,7 +1068,7 @@ def _cmd_overlay_apply(args: argparse.Namespace) -> int:
     overlay_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        bd_init(repo_root=repo_policy.path)
+        bd_prepare_workspace(repo_root=repo_policy.path)
         known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
         ready_beads = bd_ready(repo_root=repo_policy.path)
     except BdCliError as e:

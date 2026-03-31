@@ -6,6 +6,12 @@ If your clone is not configured yet, run:
 bd migrate sync beads-sync
 ```
 
+If `bd ready --json` reports that no beads database is available but `.beads/issues.jsonl` exists,
+run:
+```bash
+bd bootstrap
+```
+
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
 
 ### Why bd?
@@ -122,7 +128,7 @@ Example:
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   bd sync || true  # older bd only; newer bd auto-syncs/bootstraps without a sync subcommand
    git push
    git status  # MUST show "up to date with origin"
    ```

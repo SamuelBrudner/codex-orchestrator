@@ -8,7 +8,7 @@ from pathlib import Path
 
 from codex_orchestrator.ai_policy import AiSettings
 from codex_orchestrator.audit_trail import write_json_atomic
-from codex_orchestrator.beads_subprocess import BdCliError, bd_doctor, bd_sync
+from codex_orchestrator.beads_subprocess import bd_detect_capabilities, bd_doctor, bd_sync
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.repo_execution import (
     DiffCaps,
@@ -63,33 +63,57 @@ def _attempt_beads_maintenance(
 ) -> None:
     for repo in repos:
         try:
+            capabilities = bd_detect_capabilities(repo_root=repo.path)
+            doctor_json = capabilities.supports_structured_doctor_output
+            doctor_json_str = "unknown"
+            if doctor_json is True:
+                doctor_json_str = "yes"
+            elif doctor_json is False:
+                doctor_json_str = "no"
+            _append_run_log(
+                paths,
+                run_id=run_id,
+                message=(
+                    f"beads_capabilities repo_id={repo.repo_id} version={capabilities.version or 'unknown'} "
+                    f"workspace_layout={capabilities.workspace_layout} "
+                    f"bootstrap={'yes' if capabilities.supports_bootstrap else 'no'} "
+                    f"init_from_jsonl={'yes' if capabilities.supports_init_from_jsonl else 'no'} "
+                    f"sync={'yes' if capabilities.supports_sync else 'no'} "
+                    f"doctor_json={doctor_json_str}"
+                ),
+            )
+        except Exception as e:
+            _append_run_log(
+                paths,
+                run_id=run_id,
+                message=f"beads_capabilities repo_id={repo.repo_id} status=error error={e}",
+            )
+
+        try:
             doctor = bd_doctor(repo_root=repo.path)
-            overall_ok = doctor.get("overall_ok")
-            checks = doctor.get("checks")
-            failed_checks = 0
-            if isinstance(checks, list):
-                for item in checks:
-                    if not isinstance(item, dict):
-                        continue
-                    status = item.get("status")
-                    if isinstance(status, str) and status != "ok":
-                        failed_checks += 1
-            if overall_ok is False:
+            if doctor.status == "warn":
                 _append_run_log(
                     paths,
                     run_id=run_id,
                     message=(
                         f"beads_doctor repo_id={repo.repo_id} status=warn overall_ok=false "
-                        f"failed_checks={failed_checks}"
+                        f"failed_checks={doctor.failed_checks}"
                     ),
                 )
-            else:
+            elif doctor.status == "ok":
                 _append_run_log(
                     paths,
                     run_id=run_id,
                     message=f"beads_doctor repo_id={repo.repo_id} status=ok",
                 )
-        except BdCliError as e:
+            else:
+                detail = doctor.message or doctor.raw_output or "<none>"
+                _append_run_log(
+                    paths,
+                    run_id=run_id,
+                    message=f"beads_doctor repo_id={repo.repo_id} status={doctor.status} detail={detail}",
+                )
+        except Exception as e:
             _append_run_log(
                 paths,
                 run_id=run_id,
@@ -97,13 +121,21 @@ def _attempt_beads_maintenance(
             )
 
         try:
-            bd_sync(repo_root=repo.path)
-            _append_run_log(
-                paths,
-                run_id=run_id,
-                message=f"beads_sync repo_id={repo.repo_id} status=ok",
-            )
-        except BdCliError as e:
+            sync = bd_sync(repo_root=repo.path)
+            if sync.status == "ok":
+                _append_run_log(
+                    paths,
+                    run_id=run_id,
+                    message=f"beads_sync repo_id={repo.repo_id} status=ok",
+                )
+            else:
+                detail = sync.message or sync.raw_output or "<none>"
+                _append_run_log(
+                    paths,
+                    run_id=run_id,
+                    message=f"beads_sync repo_id={repo.repo_id} status={sync.status} detail={detail}",
+                )
+        except Exception as e:
             _append_run_log(
                 paths,
                 run_id=run_id,

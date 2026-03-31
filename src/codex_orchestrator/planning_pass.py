@@ -9,7 +9,13 @@ from pathlib import Path
 
 from codex_orchestrator.agent_guidance import ensure_commit_message_guidance_issue
 from codex_orchestrator.audit_trail import write_json_atomic, write_text_atomic
-from codex_orchestrator.beads_subprocess import BdCliError, bd_init, bd_list_ids, bd_ready, bd_show
+from codex_orchestrator.beads_subprocess import (
+    BdCliError,
+    bd_list_ids,
+    bd_prepare_workspace,
+    bd_ready,
+    bd_show,
+)
 from codex_orchestrator.contract_overlays import load_contract_overlay
 from codex_orchestrator.env_bootstrap import bootstrap_repo_env
 from codex_orchestrator.git_subprocess import GitError
@@ -152,7 +158,7 @@ def ensure_repo_run_deck(
             )
 
     logger.info("Planning run deck for repo_id=%s", repo_policy.repo_id)
-    bd_init(repo_root=repo_policy.path)
+    bd_prepare_workspace(repo_root=repo_policy.path)
     ensure_commit_message_guidance_issue(repo_root=repo_policy.path)
     known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
     ready_beads = _filter_ready_beads_by_live_status(
