@@ -97,11 +97,11 @@ def _attempt_beads_maintenance(
             )
 
         try:
-            bd_sync(repo_root=repo.path)
+            sync_result = bd_sync(repo_root=repo.path)
             _append_run_log(
                 paths,
                 run_id=run_id,
-                message=f"beads_sync repo_id={repo.repo_id} status=ok",
+                message=f"beads_sync repo_id={repo.repo_id} status={sync_result.status}",
             )
         except BdCliError as e:
             _append_run_log(

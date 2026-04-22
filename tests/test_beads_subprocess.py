@@ -84,6 +84,23 @@ def test_bd_doctor_allows_exit_one_json(tmp_path: Path, monkeypatch) -> None:
     assert out["overall_ok"] is False
 
 
+def test_bd_sync_returns_ok_for_json_payload(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        assert args == ["sync", "--json"]
+        assert cwd == repo_root
+        return '{"synced": true}'
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    out = beads_subprocess.bd_sync(repo_root=repo_root)
+
+    assert out.status == "ok"
+    assert out.payload == {"synced": True}
+
+
 def test_bd_sync_ignores_non_json_output(tmp_path: Path, monkeypatch) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -97,7 +114,47 @@ def test_bd_sync_ignores_non_json_output(tmp_path: Path, monkeypatch) -> None:
 
     out = beads_subprocess.bd_sync(repo_root=repo_root)
 
-    assert out == {}
+    assert out.status == "ok_non_json"
+    assert out.payload == {}
+
+
+def test_bd_sync_raises_on_run_failure(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        raise beads_subprocess.BdCliError("sync failed")
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    with pytest.raises(beads_subprocess.BdCliError, match="sync failed"):
+        beads_subprocess.bd_sync(repo_root=repo_root)
+
+
+def test_bd_sync_raises_when_binary_missing(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        raise beads_subprocess.BdCliError("bd CLI not found")
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    with pytest.raises(beads_subprocess.BdCliError, match="bd CLI not found"):
+        beads_subprocess.bd_sync(repo_root=repo_root)
+
+
+def test_bd_sync_raises_on_timeout(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    def _fake_run_bd(args, *, cwd, timeout_seconds=60.0, ok_exit_codes=(0,)) -> str:
+        raise beads_subprocess.BdCliError("timed out")
+
+    monkeypatch.setattr(beads_subprocess, "_run_bd", _fake_run_bd)
+
+    with pytest.raises(beads_subprocess.BdCliError, match="timed out"):
+        beads_subprocess.bd_sync(repo_root=repo_root)
 
 def test_bd_ready_uses_explicit_limit(tmp_path: Path, monkeypatch) -> None:
     repo_root = tmp_path / "repo"

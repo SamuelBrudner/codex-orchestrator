@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -13,11 +12,7 @@ from codex_orchestrator.beads_subprocess import BdCliError, bd_init, bd_list_ids
 from codex_orchestrator.contract_overlays import load_contract_overlay
 from codex_orchestrator.env_bootstrap import bootstrap_repo_env
 from codex_orchestrator.git_subprocess import GitError
-from codex_orchestrator.notebook_refactor_issues import (
-    NotebookRefactorResult,
-    detect_changed_notebooks,
-    ensure_notebook_refactor_issues,
-)
+from codex_orchestrator.notebook_refactor_issues import detect_changed_notebooks
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import (
     PlanningResult,
@@ -29,7 +24,6 @@ from codex_orchestrator.planner import (
     write_run_deck,
 )
 from codex_orchestrator.planning_audit import build_planning_audit, format_planning_audit_md
-from codex_orchestrator.planning_audit_issues import create_planning_audit_issues
 from codex_orchestrator.repo_inventory import RepoPolicy
 from codex_orchestrator.validation_runner import run_validation_commands
 
@@ -47,37 +41,6 @@ class RepoDeckPlan:
     deck_path: Path
     reused_existing_deck: bool
     planning: PlanningResult | None
-
-
-def _load_existing_created_issues(path: Path) -> list[dict[str, str]] | None:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-    except json.JSONDecodeError:
-        return None
-
-    if not isinstance(raw, dict):
-        return None
-    created = raw.get("created_issues")
-    if not isinstance(created, list):
-        return None
-
-    out: list[dict[str, str]] = []
-    for item in created:
-        if not isinstance(item, dict):
-            continue
-        issue_id = item.get("id")
-        title = item.get("title")
-        if not isinstance(issue_id, str) or not issue_id.strip():
-            continue
-        if not isinstance(title, str) or not title.strip():
-            continue
-        out.append({"id": issue_id, "title": title})
-    return out
-
 
 def _collect_validation_commands(planning: PlanningResult) -> list[str]:
     commands: list[str] = []
@@ -153,7 +116,7 @@ def ensure_repo_run_deck(
 
     logger.info("Planning run deck for repo_id=%s", repo_policy.repo_id)
     bd_init(repo_root=repo_policy.path)
-    ensure_commit_message_guidance_issue(repo_root=repo_policy.path)
+    commit_guidance = ensure_commit_message_guidance_issue(repo_root=repo_policy.path)
     known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
     ready_beads = _filter_ready_beads_by_live_status(
         repo_root=repo_policy.path,
@@ -167,7 +130,6 @@ def ensure_repo_run_deck(
     )
 
     notebook_changes: tuple[str, ...] = ()
-    notebook_refactor: NotebookRefactorResult | None = None
     try:
         notebook_changes = detect_changed_notebooks(
             repo_root=repo_policy.path,
@@ -184,25 +146,6 @@ def ensure_repo_run_deck(
         overlay.defaults.enable_notebook_refactor_issue_creation or False
     )
     notebook_refactor_limit = int(overlay.defaults.notebook_refactor_issue_limit or 0)
-    if enable_notebook_refactors and notebook_refactor_limit > 0 and notebook_changes:
-        notebook_refactor = ensure_notebook_refactor_issues(
-            repo_root=repo_policy.path,
-            notebook_paths=notebook_changes,
-            limit=notebook_refactor_limit,
-            time_budget_minutes=overlay.defaults.time_budget_minutes,
-            validation_commands=(
-                tuple(repo_policy.validation_commands)
-                + tuple(overlay.defaults.validation_commands or ())
-            ),
-            notebook_output_policy=repo_policy.notebook_output_policy,
-            block_bead_ids=tuple(bead.bead_id for bead in ready_beads),
-        )
-        if notebook_refactor.issue_ids:
-            known_bead_ids = bd_list_ids(repo_root=repo_policy.path)
-            ready_beads = _filter_ready_beads_by_live_status(
-                repo_root=repo_policy.path,
-                ready_beads=bd_ready(repo_root=repo_policy.path),
-            )
 
     planning = plan_deck_items(
         repo_policy=repo_policy,
@@ -257,34 +200,32 @@ def ensure_repo_run_deck(
     is_first_planning_pass = not planning_audit_json_path.exists()
     try:
         audit = build_planning_audit(run_id=run_id, repo_policy=repo_policy)
+        audit["commit_guidance"] = {
+            "agents_path": commit_guidance.agents_path.name,
+            "guidance_present": commit_guidance.guidance_present,
+            "note": commit_guidance.note,
+            "next_action": commit_guidance.next_action,
+        }
+        audit_notes = audit.get("audit_notes")
+        if not isinstance(audit_notes, list):
+            audit_notes = []
+            audit["audit_notes"] = audit_notes
+        next_actions = audit.get("next_actions")
+        if not isinstance(next_actions, list):
+            next_actions = []
+            audit["next_actions"] = next_actions
+        if commit_guidance.note:
+            audit_notes.append(commit_guidance.note)
+        if commit_guidance.next_action:
+            next_actions.append(commit_guidance.next_action)
         audit["notebook_refactor"] = {
             "changed_notebooks": list(notebook_changes),
-            "created_issues": [
-                {"id": issue.issue_id, "title": issue.title}
-                for issue in (notebook_refactor.created_issues if notebook_refactor else ())
-            ],
+            "created_issues": [],
             "enabled": enable_notebook_refactors,
             "limit": notebook_refactor_limit,
         }
-        created_issues_payload: list[dict[str, str]] = []
-        if is_first_planning_pass:
-            enabled = bool(overlay.defaults.enable_planning_audit_issue_creation or False)
-            limit = int(overlay.defaults.planning_audit_issue_limit or 0)
-            if enabled and limit > 0:
-                created = create_planning_audit_issues(
-                    repo_root=repo_policy.path,
-                    audit=audit,
-                    limit=limit,
-                )
-                created_issues_payload = [
-                    {"id": issue.issue_id, "title": issue.title} for issue in created
-                ]
-        else:
-            existing = _load_existing_created_issues(planning_audit_json_path)
-            if existing is not None:
-                created_issues_payload = existing
-
-        audit["created_issues"] = created_issues_payload
+        del is_first_planning_pass
+        audit["created_issues"] = []
         write_json_atomic(planning_audit_json_path, audit)
         write_text_atomic(planning_audit_md_path, format_planning_audit_md(audit))
     except Exception as e:

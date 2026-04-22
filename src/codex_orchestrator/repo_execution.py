@@ -6,7 +6,7 @@ import os
 import re
 import shlex
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -169,6 +169,103 @@ class RepoTickResult:
     beads_attempted: int
     beads_closed: int
     bead_results: tuple[BeadResult, ...]
+
+
+@dataclass(slots=True)
+class _CodexAttemptRuntime:
+    pid: int | None = None
+    heartbeat_stop: threading.Event | None = None
+    heartbeat_thread: threading.Thread | None = None
+
+
+def _start_codex_heartbeat(
+    *,
+    repo_id: str,
+    bead_id: str,
+    attempt: int,
+    pid: int,
+    started_at: datetime,
+    timeout_seconds: float,
+    log_path: Path,
+    emit: Callable[..., None],
+) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop_event.wait(_CODEX_HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                hb_now = _now()
+                elapsed = (hb_now - started_at).total_seconds()
+                remaining_seconds = max(0.0, timeout_seconds - elapsed)
+                _append_log(
+                    log_path,
+                    f"{hb_now.isoformat()} codex_heartbeat bead_id={bead_id} "
+                    f"attempt={attempt} pid={pid} elapsed={elapsed:.0f}s "
+                    f"remaining={remaining_seconds:.0f}s",
+                )
+                emit(
+                    "codex_heartbeat",
+                    bead_id=bead_id,
+                    attempt=attempt,
+                    pid=pid,
+                    elapsed_seconds=elapsed,
+                    remaining_seconds=remaining_seconds,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as hb_err:
+                _append_log(
+                    log_path,
+                    f"{_now().isoformat()} codex_heartbeat_error bead_id={bead_id} "
+                    f"attempt={attempt} pid={pid} error={type(hb_err).__name__}: {hb_err}",
+                )
+                break
+
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat,
+        name=f"codex-heartbeat-{repo_id}-{bead_id}-{attempt}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    return stop_event, heartbeat_thread
+
+
+def _make_codex_on_start_callback(
+    *,
+    runtime: _CodexAttemptRuntime,
+    repo_id: str,
+    bead_id: str,
+    attempt: int,
+    timeout_seconds: float,
+    log_path: Path,
+    emit: Callable[..., None],
+) -> Callable[[int, tuple[str, ...], datetime], None]:
+    def _on_codex_start(pid: int, argv: tuple[str, ...], started_at: datetime) -> None:
+        runtime.pid = pid
+        _append_log(
+            log_path,
+            f"{_now().isoformat()} codex_spawn bead_id={bead_id} "
+            f"attempt={attempt} pid={pid}",
+        )
+        emit(
+            "codex_spawn",
+            bead_id=bead_id,
+            attempt=attempt,
+            pid=pid,
+            started_at=started_at.isoformat(),
+            argv=list(argv),
+        )
+        runtime.heartbeat_stop, runtime.heartbeat_thread = _start_codex_heartbeat(
+            repo_id=repo_id,
+            bead_id=bead_id,
+            attempt=attempt,
+            pid=pid,
+            started_at=started_at,
+            timeout_seconds=timeout_seconds,
+            log_path=log_path,
+            emit=emit,
+        )
+
+    return _on_codex_start
 
 
 def _which(tool: str) -> str | None:
@@ -1550,11 +1647,19 @@ def execute_repo_tick(
         with events_lock:
             append_jsonl(events_path, payload)
 
-    def _current_summary_payload(*, branch: str | None) -> dict[str, Any]:
+    def _build_summary_payload(
+        *,
+        branch: str | None,
+        skipped: bool,
+        skip_reason: RepoSkipReason | None,
+        stop_reason_value: RepoStopReason | None,
+        beads_attempted_count: int,
+        beads_closed_count: int,
+    ) -> dict[str, Any]:
         next_action = _infer_next_action(
-            skipped=False,
-            skip_reason=None,
-            stop_reason=stop_reason,
+            skipped=skipped,
+            skip_reason=skip_reason,
+            stop_reason=stop_reason_value,
             bead_audits=bead_audits,
         )
         codex_argv = (
@@ -1569,11 +1674,11 @@ def execute_repo_tick(
             "repo_id": repo_policy.repo_id,
             "repo_path": repo_policy.path.as_posix(),
             "branch": branch,
-            "skipped": False,
-            "skip_reason": None,
-            "stop_reason": stop_reason,
-            "beads_attempted": beads_attempted,
-            "beads_closed": beads_closed,
+            "skipped": skipped,
+            "skip_reason": skip_reason,
+            "stop_reason": stop_reason_value,
+            "beads_attempted": beads_attempted_count,
+            "beads_closed": beads_closed_count,
             "deck_path": deck_path.as_posix() if deck_path is not None else None,
             "reused_existing_deck": reused_existing_deck,
             "planning_audit": {
@@ -1642,7 +1747,14 @@ def execute_repo_tick(
             if summary is not None
             else _merge_repo_summary(
                 _load_json_object(summary_path),
-                _current_summary_payload(branch=branch),
+                _build_summary_payload(
+                    branch=branch,
+                    skipped=False,
+                    skip_reason=None,
+                    stop_reason_value=stop_reason,
+                    beads_attempted_count=beads_attempted,
+                    beads_closed_count=beads_closed,
+                ),
             )
         )
         planning_audit = live_summary.get("planning_audit")
@@ -1697,70 +1809,14 @@ def execute_repo_tick(
         return run_report_path
 
     def finalize(result: RepoTickResult) -> RepoTickResult:
-        next_action = _infer_next_action(
+        current_summary = _build_summary_payload(
+            branch=result.branch,
             skipped=result.skipped,
             skip_reason=result.skip_reason,
-            stop_reason=result.stop_reason,
-            bead_audits=bead_audits,
+            stop_reason_value=result.stop_reason,
+            beads_attempted_count=result.beads_attempted,
+            beads_closed_count=result.beads_closed,
         )
-        codex_argv = (
-            "codex",
-            "exec",
-            "--full-auto",
-            *codex_cli_args_for_settings(config.ai_settings),
-        )
-        current_summary = {
-            "schema_version": 1,
-            "run_id": run_id,
-            "repo_id": repo_policy.repo_id,
-            "repo_path": repo_policy.path.as_posix(),
-            "branch": result.branch,
-            "skipped": result.skipped,
-            "skip_reason": result.skip_reason,
-            "stop_reason": result.stop_reason,
-            "beads_attempted": result.beads_attempted,
-            "beads_closed": result.beads_closed,
-            "deck_path": deck_path.as_posix() if deck_path is not None else None,
-            "reused_existing_deck": reused_existing_deck,
-            "planning_audit": {
-                "json_path": planning_audit_json_path.as_posix(),
-                "md_path": planning_audit_md_path.as_posix(),
-                "json_exists": planning_audit_json_path.exists(),
-                "md_exists": planning_audit_md_path.exists(),
-            },
-            "run_report_path": run_report_path.as_posix() if run_report_path is not None else None,
-            "beads": bead_audits,
-            "planning_skipped_beads": planning_skipped,
-            "failures": repo_failures,
-            "follow_ups": follow_ups,
-            "prompts": prompt_records,
-            "validations": [
-                {"command": cmd, "status": status}
-                for cmd, status in sorted(validation_status_by_command.items())
-            ],
-            "notebook_refactors": {
-                "notebooks": sorted(notebooks_touched),
-                "extracted_code": sorted(extracted_code_touched),
-            },
-            "high_level_context": {
-                "focus": config.focus,
-                "planned_beads": list(planned_scope),
-                "replan_requested": bool(config.replan),
-                "reused_existing_deck": reused_existing_deck,
-                "planning_skipped_count": len(planning_skipped),
-                "safety": {
-                    "max_beads_per_tick": config.max_beads_per_tick,
-                    "min_minutes_to_start_new_bead": config.min_minutes_to_start_new_bead,
-                    "diff_cap_files": config.diff_caps.max_files_changed,
-                    "diff_cap_lines": config.diff_caps.max_lines_added,
-                },
-            },
-            "ai_settings": config.ai_settings.to_json_dict(),
-            "codex_command": shlex.join(codex_argv),
-            "codex_argv": list(codex_argv),
-            "tool_versions": tool_versions,
-            "next_action": next_action,
-        }
         existing_summary = _load_json_object(summary_path)
         summary = _merge_repo_summary(existing_summary, current_summary)
         write_json_atomic(summary_path, summary)
@@ -1779,7 +1835,7 @@ def execute_repo_tick(
             stop_reason=result.stop_reason,
             beads_attempted=result.beads_attempted,
             beads_closed=result.beads_closed,
-            next_action=next_action,
+            next_action=current_summary["next_action"],
         )
         return result
 
@@ -2112,9 +2168,7 @@ def execute_repo_tick(
                             ).total_seconds(),
                         ),
                     )
-                    codex_pid: int | None = None
-                    heartbeat_stop: threading.Event | None = None
-                    heartbeat_thread: threading.Thread | None = None
+                    attempt_runtime = _CodexAttemptRuntime()
                     _append_log(
                         log_path,
                         f"{_now().isoformat()} codex_start bead_id={item.bead_id} "
@@ -2133,65 +2187,6 @@ def execute_repo_tick(
                         timeout_seconds=timeout_seconds,
                         argv=list(codex_argv),
                     )
-
-                    def _on_codex_start(
-                        pid: int, argv: tuple[str, ...], started_at: datetime
-                    ) -> None:
-                        nonlocal codex_pid, heartbeat_stop, heartbeat_thread
-                        codex_pid = pid
-                        _append_log(
-                            log_path,
-                            f"{_now().isoformat()} codex_spawn bead_id={item.bead_id} "
-                            f"attempt={attempt} pid={pid}",
-                        )
-                        emit(
-                            "codex_spawn",
-                            bead_id=item.bead_id,
-                            attempt=attempt,
-                            pid=pid,
-                            started_at=started_at.isoformat(),
-                            argv=list(argv),
-                        )
-
-                        stop_event = threading.Event()
-                        heartbeat_stop = stop_event
-
-                        def _heartbeat() -> None:
-                            while not stop_event.wait(_CODEX_HEARTBEAT_INTERVAL_SECONDS):
-                                try:
-                                    hb_now = _now()
-                                    elapsed = (hb_now - started_at).total_seconds()
-                                    remaining_seconds = max(0.0, timeout_seconds - elapsed)
-                                    _append_log(
-                                        log_path,
-                                        f"{hb_now.isoformat()} codex_heartbeat bead_id={item.bead_id} "
-                                        f"attempt={attempt} pid={pid} elapsed={elapsed:.0f}s "
-                                        f"remaining={remaining_seconds:.0f}s",
-                                    )
-                                    emit(
-                                        "codex_heartbeat",
-                                        bead_id=item.bead_id,
-                                        attempt=attempt,
-                                        pid=pid,
-                                        elapsed_seconds=elapsed,
-                                        remaining_seconds=remaining_seconds,
-                                        timeout_seconds=timeout_seconds,
-                                    )
-                                except Exception as hb_err:
-                                    _append_log(
-                                        log_path,
-                                        f"{_now().isoformat()} codex_heartbeat_error bead_id={item.bead_id} "
-                                        f"attempt={attempt} pid={pid} error={type(hb_err).__name__}: {hb_err}",
-                                    )
-                                    break
-
-                        t = threading.Thread(
-                            target=_heartbeat,
-                            name=f"codex-heartbeat-{repo_policy.repo_id}-{item.bead_id}-{attempt}",
-                            daemon=True,
-                        )
-                        heartbeat_thread = t
-                        t.start()
                     try:
                         codex_invocation = codex_exec_full_auto(
                             prompt=codex_prompt,
@@ -2199,7 +2194,15 @@ def execute_repo_tick(
                             timeout_seconds=timeout_seconds,
                             extra_args=codex_cli_args_for_settings(config.ai_settings),
                             output_limit_chars=config.codex_output_limit_chars,
-                            on_start=_on_codex_start,
+                            on_start=_make_codex_on_start_callback(
+                                runtime=attempt_runtime,
+                                repo_id=repo_policy.repo_id,
+                                bead_id=item.bead_id,
+                                attempt=attempt,
+                                timeout_seconds=timeout_seconds,
+                                log_path=log_path,
+                                emit=emit,
+                            ),
                         )
                     except Exception as e:
                         if isinstance(e, CodexCliError):
@@ -2235,7 +2238,7 @@ def execute_repo_tick(
                             "codex_failed",
                             bead_id=item.bead_id,
                             attempt=attempt,
-                            pid=codex_pid,
+                            pid=attempt_runtime.pid,
                             error=failure_error,
                             argv=list(codex_argv),
                         )
@@ -2258,10 +2261,10 @@ def execute_repo_tick(
                                 repo_failures.append(f"Failed to commit run report: {commit_err}")
                         break
                     finally:
-                        if heartbeat_stop is not None:
-                            heartbeat_stop.set()
-                        if heartbeat_thread is not None:
-                            heartbeat_thread.join(timeout=2.0)
+                        if attempt_runtime.heartbeat_stop is not None:
+                            attempt_runtime.heartbeat_stop.set()
+                        if attempt_runtime.heartbeat_thread is not None:
+                            attempt_runtime.heartbeat_thread.join(timeout=2.0)
 
                     _append_log(
                         log_path,

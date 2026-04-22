@@ -5,7 +5,7 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from codex_orchestrator.planner import ReadyBead
 
@@ -46,6 +46,12 @@ class BdIssueSummary:
     issue_id: str
     title: str
     status: str
+
+
+@dataclass(frozen=True, slots=True)
+class BdSyncResult:
+    status: Literal["ok", "ok_non_json"]
+    payload: dict[str, Any]
 
 
 def _run_bd(
@@ -275,18 +281,20 @@ def bd_doctor(*, repo_root: Path) -> dict[str, Any]:
     return data
 
 
-def bd_sync(*, repo_root: Path) -> dict[str, Any]:
-    # Some bd versions accept `--json` but still emit human-readable progress text on stdout,
-    # which is not parseable JSON. Treat non-JSON output as a successful no-op and return {}.
+def bd_sync(*, repo_root: Path) -> BdSyncResult:
+    # Some bd versions accept `--json` but still emit human-readable progress text on stdout.
+    # Tolerate successful non-JSON output, but still fail loud on actual CLI errors.
+    stdout = _run_bd(["sync", "--json"], cwd=repo_root)
     try:
-        data = _parse_json_output(_run_bd(["sync", "--json"], cwd=repo_root))
+        data = _parse_json_output(stdout)
     except BdCliError:
-        return {}
+        return BdSyncResult(status="ok_non_json", payload={})
     if data is None:
-        return {}
+        status: Literal["ok", "ok_non_json"] = "ok_non_json" if stdout.strip() else "ok"
+        return BdSyncResult(status=status, payload={})
     if not isinstance(data, dict):
-        return {}
-    return data
+        return BdSyncResult(status="ok_non_json", payload={})
+    return BdSyncResult(status="ok", payload=data)
 
 
 def bd_list(*, repo_root: Path) -> tuple[BdIssueSummary, ...]:

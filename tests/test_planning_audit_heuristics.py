@@ -84,6 +84,21 @@ def test_planning_audit_detects_duplicate_model_shapes_across_paradigms(tmp_path
     )
 
 
+def test_planning_audit_records_missing_semantics_as_note_not_finding(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    audit = build_planning_audit(run_id="run-1", repo_policy=_policy(tmp_path=tmp_path))
+
+    findings = audit.get("findings")
+    assert isinstance(findings, list)
+    assert not any(
+        isinstance(finding, dict) and finding.get("title") == "No semantics registry detected"
+        for finding in findings
+    )
+    assert "No semantics registry detected; heuristic audit will rely on file structure only." in audit["audit_notes"]
+
+
 def test_planning_audit_detects_repeated_config_parsing_patterns(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     for name in ("a.py", "b.py", "c.py"):
@@ -102,6 +117,8 @@ def test_planning_audit_detects_repeated_config_parsing_patterns(tmp_path: Path)
     finding = _find_finding(audit, title="Repeated config parsing patterns detected")
 
     assert finding["category"] == "config_parsing_dry"
+    assert finding["severity"] == "info"
+    assert finding["confidence"] == "low"
     assert set(finding["evidence_paths"]) >= {"src/a.py", "src/b.py", "src/c.py"}
 
     rationale = finding.get("confidence_rationale")
@@ -119,3 +136,37 @@ def test_planning_audit_detects_repeated_config_parsing_patterns(tmp_path: Path)
         for item in hot
     )
 
+
+def test_planning_audit_marks_multiple_model_paradigms_as_info_low_confidence(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text(
+        "\n".join(
+            [
+                "from pydantic import BaseModel",
+                "",
+                "class UserDTO(BaseModel):",
+                "    id: int",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "b.py").write_text(
+        "\n".join(
+            [
+                "from dataclasses import dataclass",
+                "",
+                "@dataclass",
+                "class User:",
+                "    id: int",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    audit = build_planning_audit(run_id="run-1", repo_policy=_policy(tmp_path=tmp_path))
+    finding = _find_finding(audit, title="Multiple model paradigms detected (Pydantic/dataclass/TypedDict)")
+
+    assert finding["severity"] == "info"
+    assert finding["confidence"] == "low"

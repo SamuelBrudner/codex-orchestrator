@@ -4,8 +4,6 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from codex_orchestrator.beads_subprocess import BdIssue, bd_create, bd_list_open_titles
-
 logger = logging.getLogger(__name__)
 
 COMMIT_GUIDANCE_TITLE = "Add commit message guidance to AGENTS.md"
@@ -16,8 +14,8 @@ COMMIT_GUIDANCE_SNIPPET = "(feat): <description of the work that was done> (pres
 class CommitGuidanceResult:
     agents_path: Path
     guidance_present: bool
-    issue_already_open: bool
-    created_issue: BdIssue | None
+    note: str | None
+    next_action: str | None
 
 
 def _find_agents_path(repo_root: Path) -> Path:
@@ -48,47 +46,16 @@ def ensure_commit_message_guidance_issue(*, repo_root: Path) -> CommitGuidanceRe
         return CommitGuidanceResult(
             agents_path=agents_path,
             guidance_present=True,
-            issue_already_open=False,
-            created_issue=None,
+            note=None,
+            next_action=None,
         )
-
-    open_titles = bd_list_open_titles(repo_root=repo_root)
-    if COMMIT_GUIDANCE_TITLE in open_titles:
-        return CommitGuidanceResult(
-            agents_path=agents_path,
-            guidance_present=False,
-            issue_already_open=True,
-            created_issue=None,
-        )
-
-    description = (
-        "Add commit message guidance to AGENTS.md (create the file if missing). "
-        f"Required format: `{COMMIT_GUIDANCE_SNIPPET}`."
-    )
-    acceptance = (
-        "- AGENTS.md includes a Commit Messages section.\n"
-        f"- The section specifies `{COMMIT_GUIDANCE_SNIPPET}`.\n"
-        "- The section includes a short example."
-    )
-
-    issue = bd_create(
-        repo_root=repo_root,
-        title=COMMIT_GUIDANCE_TITLE,
-        issue_type="task",
-        priority=2,
-        description=description,
-        acceptance_criteria=acceptance,
-    )
-
-    logger.info(
-        "Created commit message guidance issue %s for repo_root=%s",
-        issue.issue_id,
-        repo_root,
-    )
 
     return CommitGuidanceResult(
         agents_path=agents_path,
         guidance_present=False,
-        issue_already_open=False,
-        created_issue=issue,
+        note=f"Commit message guidance missing from {agents_path.name}.",
+        next_action=(
+            f"Add a Commit Messages section to {agents_path.name} using "
+            f"`{COMMIT_GUIDANCE_SNIPPET}`."
+        ),
     )

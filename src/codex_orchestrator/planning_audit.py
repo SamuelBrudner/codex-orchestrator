@@ -108,6 +108,11 @@ def _assemble_inputs(
     max_files: int, max_python_files_scanned: int,
 ) -> _AssembleInputs:
     status, notes, actions = _generation_status(collection=collection, inv=inv, scan=signals.get("scan"))
+    if inv.semantics_yml is None:
+        notes.append("No semantics registry detected; heuristic audit will rely on file structure only.")
+        actions.append(
+            "Consider adding metadata/semantics/semantics.yml if this repo has stable domain entities."
+        )
     return _AssembleInputs(
         run_id, repo_policy, repo_root, inv, collection,
         status, notes, actions,
@@ -905,8 +910,8 @@ def _build_findings(
     semantics_yml: Path | None,
     signals: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    del semantics_yml
     findings: list[dict[str, Any]] = []
-    _append_if(findings, _finding_missing_semantics(semantics_yml))
     _append_if(findings, _finding_duplicate_model_shapes(signals))
     _append_if(findings, _finding_duplicate_model_modules(signals))
     _append_if(findings, _finding_multiple_model_paradigms(signals))
@@ -921,20 +926,6 @@ def _build_findings(
 def _append_if(findings: list[dict[str, Any]], finding: dict[str, Any] | None) -> None:
     if finding is not None:
         findings.append(finding)
-
-
-def _finding_missing_semantics(semantics_yml: Path | None) -> dict[str, Any] | None:
-    if semantics_yml is not None:
-        return None
-    return {
-        "category": "semantic_registry",
-        "title": "No semantics registry detected",
-        "severity": "medium",
-        "confidence": "high",
-        "confidence_rationale": ["trigger:missing_semantics_registry"],
-        "evidence_paths": [],
-        "recommendation": "Add metadata/semantics/semantics.yml to register core entities and canonical functions.",
-    }
 
 
 def _finding_duplicate_model_shapes(signals: dict[str, Any]) -> dict[str, Any] | None:
@@ -1023,8 +1014,8 @@ def _finding_multiple_model_paradigms(signals: dict[str, Any]) -> dict[str, Any]
     return {
         "category": "semantic_modeling_consistency",
         "title": "Multiple model paradigms detected (Pydantic/dataclass/TypedDict)",
-        "severity": "low",
-        "confidence": "medium",
+        "severity": "info",
+        "confidence": "low",
         "confidence_rationale": [f"trigger:multiple_model_paradigms(paradigms={','.join(paradigms)})"],
         "evidence_paths": _merge_paths(pydantic, dataclasses, typed_dicts),
         "recommendation": "Prefer one primary modeling approach for core domain entities to reduce conceptual drift.",
@@ -1052,9 +1043,8 @@ def _finding_repeated_config_parsing(signals: dict[str, Any]) -> dict[str, Any] 
     for _, paths in hot:
         evidence.update(paths)
 
-    max_files = max((len(paths) for _, paths in hot), default=0)
-    severity = "medium" if max_files >= 5 or len(hot) >= 2 else "low"
-    confidence = "medium"
+    severity = "info"
+    confidence = "low"
     rationale = [
         f"trigger:repeated_config_parsing(patterns={len(hot)})",
         "signal:config_patterns_repeated_in_3+_files",
