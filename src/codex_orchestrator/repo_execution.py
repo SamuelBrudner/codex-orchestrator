@@ -455,8 +455,15 @@ def _collect_missing_modules(validation_results: Mapping[str, ValidationResult])
     return sorted(missing)
 
 
-def _baseline_validation_context(item: RunDeckItem) -> str | None:
-    failures = [r for r in item.baseline_validation if r.exit_code != 0]
+@dataclass(frozen=True, slots=True)
+class _RuntimeBaselineSnapshot:
+    results: tuple[ValidationResult, ...]
+    failing_commands: tuple[str, ...]
+    context: str | None
+
+
+def _format_runtime_baseline_context(results: Sequence[ValidationResult]) -> str | None:
+    failures = [r for r in results if r.exit_code != 0]
     if not failures:
         return None
     lines = ["Baseline validation failures (before this bead):"]
@@ -464,6 +471,39 @@ def _baseline_validation_context(item: RunDeckItem) -> str | None:
         lines.append(f"- {r.command}: exit={r.exit_code}")
     lines.append("Resolve these if possible (install missing tools or fix tests).")
     return "\n".join(lines)
+
+
+def _capture_runtime_baseline(
+    *,
+    item: RunDeckItem,
+    repo_root: Path,
+    tick: TickBudget,
+    bead_deadline: datetime,
+    configured_timeout_seconds: float,
+) -> _RuntimeBaselineSnapshot:
+    _require_validation_allowlist(item.contract.validation_commands)
+    timeout_seconds = _validation_timeout_seconds(
+        commands=item.contract.validation_commands,
+        remaining=_remaining_bead_time(
+            tick=tick,
+            now=_now(),
+            bead_deadline=bead_deadline,
+        ),
+        configured_timeout_seconds=configured_timeout_seconds,
+    )
+    results_by_command = run_validation_commands(
+        item.contract.validation_commands,
+        cwd=repo_root,
+        env=item.contract.env,
+        timeout_seconds=timeout_seconds,
+    )
+    results = tuple(results_by_command.values())
+    failing_commands = tuple(r.command for r in results if r.exit_code != 0)
+    return _RuntimeBaselineSnapshot(
+        results=results,
+        failing_commands=failing_commands,
+        context=_format_runtime_baseline_context(results),
+    )
 
 
 def _format_validation_retry_context(
@@ -1548,10 +1588,6 @@ def _ensure_run_branch(
     return run_branch, fetch_error
 
 
-def _baseline_by_command(item: RunDeckItem) -> dict[str, ValidationResult]:
-    return {r.command: r for r in item.baseline_validation}
-
-
 def _format_validation_summary(results: dict[str, ValidationResult]) -> str:
     lines: list[str] = []
     for cmd in sorted(results):
@@ -2086,10 +2122,6 @@ def execute_repo_tick(
 
                 head_before = git_rev_parse(repo_root=repo_policy.path)
                 emit("bead_start", bead_id=item.bead_id, title=item.title)
-                baseline_failures = tuple(
-                    r.command for r in item.baseline_validation if r.exit_code != 0
-                )
-                validation_context = _baseline_validation_context(item)
                 bead_started_at = _now()
                 bead_deadline = bead_started_at + (
                     timedelta(minutes=item.contract.time_budget_minutes)
@@ -2098,6 +2130,8 @@ def execute_repo_tick(
                 attempt = 0
                 env_preflight_checked = False
                 stop_retry_attempts = False
+                runtime_baseline: _RuntimeBaselineSnapshot | None = None
+                validation_context: str | None = None
 
                 while True:
                     issue = bd_show(repo_root=repo_policy.path, issue_id=item.bead_id)
@@ -2122,6 +2156,45 @@ def execute_repo_tick(
                         )
                         stop_retry_attempts = True
                         break
+
+                    if runtime_baseline is None:
+                        try:
+                            runtime_baseline = _capture_runtime_baseline(
+                                item=item,
+                                repo_root=repo_policy.path,
+                                tick=tick,
+                                bead_deadline=bead_deadline,
+                                configured_timeout_seconds=config.validation_timeout_seconds,
+                            )
+                        except RepoExecutionError as e:
+                            _append_issue_failure_note(
+                                repo_root=repo_policy.path,
+                                issue_id=item.bead_id,
+                                note=f"[orchestrator] {e}",
+                                reopen_closed=True,
+                            )
+                            bead_results.append(
+                                BeadResult(
+                                    bead_id=item.bead_id,
+                                    title=item.title,
+                                    outcome="failed",
+                                    detail=str(e),
+                                )
+                            )
+                            bead_audits.append(
+                                {
+                                    "bead_id": item.bead_id,
+                                    "title": item.title,
+                                    "outcome": "failed",
+                                    "detail": str(e),
+                                }
+                            )
+                            repo_failures.append(f"{item.bead_id}: {e}")
+                            stop_reason = "blocked"
+                            maybe_write_repo_report(branch=run_branch)
+                            stop_retry_attempts = True
+                            break
+                        validation_context = runtime_baseline.context
 
                     attempt += 1
                     now = _now()
@@ -2699,7 +2772,7 @@ def execute_repo_tick(
                     )
                     still_failing = sorted(
                         cmd
-                        for cmd in baseline_failures
+                        for cmd in runtime_baseline.failing_commands
                         if validation_results.get(cmd) is not None
                         and validation_results[cmd].exit_code != 0
                     )
@@ -2802,7 +2875,7 @@ def execute_repo_tick(
                             validation_context = _format_validation_retry_context(
                                 attempt=attempt,
                                 validation_results=validation_results,
-                                baseline_failures=baseline_failures,
+                                baseline_failures=runtime_baseline.failing_commands,
                             )
                             continue
 
@@ -2831,7 +2904,7 @@ def execute_repo_tick(
                             run_id=run_id,
                             attempt=attempt,
                             failed_commands=failed_commands,
-                            baseline_failures=baseline_failures,
+                            baseline_failures=runtime_baseline.failing_commands,
                             validation_results=validation_results,
                             changed_paths=changed_paths,
                         )

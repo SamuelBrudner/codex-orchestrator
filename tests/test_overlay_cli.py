@@ -128,6 +128,10 @@ def test_overlay_apply_writes_file_and_dry_run_ok(tmp_path: Path) -> None:
     assert "time_budget_minutes" in overlay_text
     assert "allow_env_creation" in overlay_text
     assert "requires_notebook_execution" in overlay_text
+    assert "planning_audit_issue_limit" not in overlay_text
+    assert "enable_planning_audit_issue_creation" not in overlay_text
+    assert "notebook_refactor_issue_limit" not in overlay_text
+    assert "enable_notebook_refactor_issue_creation" not in overlay_text
 
     dry_run_result = _run_cli(
         cwd=tmp_path,

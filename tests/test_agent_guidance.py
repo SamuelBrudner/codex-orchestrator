@@ -11,7 +11,7 @@ def test_commit_guidance_skips_when_present(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = agent_guidance.ensure_commit_message_guidance_issue(repo_root=tmp_path)
+    result = agent_guidance.inspect_commit_message_guidance(repo_root=tmp_path)
 
     assert result.guidance_present is True
     assert result.note is None
@@ -21,7 +21,7 @@ def test_commit_guidance_skips_when_present(tmp_path: Path) -> None:
 def test_commit_guidance_reports_next_action_when_missing(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_text("Placeholder", encoding="utf-8")
 
-    result = agent_guidance.ensure_commit_message_guidance_issue(repo_root=tmp_path)
+    result = agent_guidance.inspect_commit_message_guidance(repo_root=tmp_path)
 
     assert result.guidance_present is False
     assert result.note == "Commit message guidance missing from AGENTS.md."
@@ -30,7 +30,7 @@ def test_commit_guidance_reports_next_action_when_missing(tmp_path: Path) -> Non
 
 
 def test_commit_guidance_defaults_to_agents_md_when_missing(tmp_path: Path) -> None:
-    result = agent_guidance.ensure_commit_message_guidance_issue(repo_root=tmp_path)
+    result = agent_guidance.inspect_commit_message_guidance(repo_root=tmp_path)
 
     assert result.guidance_present is False
     assert result.agents_path == tmp_path / "AGENTS.md"

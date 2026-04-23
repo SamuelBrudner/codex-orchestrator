@@ -38,30 +38,11 @@ def _policy(*, tmp_path: Path) -> RepoPolicy:
 
 
 @pytest.fixture(autouse=True)
-def _stub_bootstrap_repo_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    import codex_orchestrator.planning_pass as planning_pass
-    from codex_orchestrator.env_bootstrap import BootstrapResult
-
-    def _bootstrap_repo_env(*, env_name: str, repo_root: Path, allow_env_creation: bool) -> BootstrapResult:
-        return BootstrapResult(
-            env_name=env_name,
-            env_existed=True,
-            env_created=False,
-            repo_installed=True,
-            install_attempted=True,
-            install_succeeded=True,
-            error=None,
-        )
-
-    monkeypatch.setattr(planning_pass, "bootstrap_repo_env", _bootstrap_repo_env)
-
-
-@pytest.fixture(autouse=True)
 def _stub_commit_message_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
     import codex_orchestrator.planning_pass as planning_pass
     from codex_orchestrator.agent_guidance import CommitGuidanceResult
 
-    def _ensure_commit_message_guidance_issue(*, repo_root: Path) -> CommitGuidanceResult:
+    def _inspect_commit_message_guidance(*, repo_root: Path) -> CommitGuidanceResult:
         return CommitGuidanceResult(
             agents_path=repo_root / "AGENTS.md",
             guidance_present=True,
@@ -71,8 +52,8 @@ def _stub_commit_message_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         planning_pass,
-        "ensure_commit_message_guidance_issue",
-        _ensure_commit_message_guidance_issue,
+        "inspect_commit_message_guidance",
+        _inspect_commit_message_guidance,
     )
 
 
@@ -127,7 +108,6 @@ def test_planning_pass_reuses_existing_deck(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(planning_pass, "bd_list_ids", _fail)
     monkeypatch.setattr(planning_pass, "bd_ready", _fail)
     monkeypatch.setattr(planning_pass, "build_planning_audit", _fail)
-    monkeypatch.setattr(planning_pass, "run_validation_commands", _fail)
 
     result = ensure_repo_run_deck(
         paths=paths,
@@ -178,7 +158,9 @@ def test_planning_pass_writes_planning_audit_artifacts(
     run_id = "run-456"
     now = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
+    import codex_orchestrator.env_bootstrap as env_bootstrap
     import codex_orchestrator.planning_pass as planning_pass
+    import codex_orchestrator.validation_runner as validation_runner
 
     def _bd_init(*, repo_root: Path) -> None:
         return None
@@ -189,23 +171,14 @@ def test_planning_pass_writes_planning_audit_artifacts(
     def _bd_ready(*, repo_root: Path) -> list[ReadyBead]:
         return [ReadyBead(bead_id="bd-1", title="My bead")]
 
-    def _run_validations(
-        commands,
-        *,
-        cwd: Path,
-        env: str | None = None,
-        timeout_seconds: float = 900.0,
-        output_limit_chars: int = 20_000,
-    ) -> dict[str, ValidationResult]:
-        return {
-            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
-            for cmd in commands
-        }
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("Planning unexpectedly executed runtime bootstrap/validation work.")
 
     monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
-    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
+    monkeypatch.setattr(env_bootstrap, "bootstrap_repo_env", _fail)
+    monkeypatch.setattr(validation_runner, "run_validation_commands", _fail)
 
     result = ensure_repo_run_deck(
         paths=paths,
@@ -281,23 +254,9 @@ def test_planning_pass_applies_focus_filter_to_run_deck(
             ),
         ]
 
-    def _run_validations(
-        commands,
-        *,
-        cwd: Path,
-        env: str | None = None,
-        timeout_seconds: float = 900.0,
-        output_limit_chars: int = 20_000,
-    ) -> dict[str, ValidationResult]:
-        return {
-            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
-            for cmd in commands
-        }
-
     monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
-    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
 
     result = ensure_repo_run_deck(
         paths=paths,
@@ -375,24 +334,10 @@ def test_planning_pass_filters_ready_beads_with_non_open_live_status(
             dependents=(),
         )
 
-    def _run_validations(
-        commands,
-        *,
-        cwd: Path,
-        env: str | None = None,
-        timeout_seconds: float = 900.0,
-        output_limit_chars: int = 20_000,
-    ) -> dict[str, ValidationResult]:
-        return {
-            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
-            for cmd in commands
-        }
-
     monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
     monkeypatch.setattr(planning_pass, "bd_show", _bd_show)
-    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
 
     result = ensure_repo_run_deck(
         paths=paths,
@@ -441,26 +386,12 @@ def test_planning_pass_fails_without_writing_deck_when_audit_fails(
     def _bd_ready(*, repo_root: Path) -> list[ReadyBead]:
         return [ReadyBead(bead_id="bd-1", title="My bead")]
 
-    def _run_validations(
-        commands,
-        *,
-        cwd: Path,
-        env: str | None = None,
-        timeout_seconds: float = 900.0,
-        output_limit_chars: int = 20_000,
-    ) -> dict[str, ValidationResult]:
-        return {
-            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
-            for cmd in commands
-        }
-
     def _build_audit_fail(*, run_id: str, repo_policy: RepoPolicy) -> dict[str, object]:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
-    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
     monkeypatch.setattr(planning_pass, "build_planning_audit", _build_audit_fail)
 
     with pytest.raises(PlanningPassError):
@@ -478,7 +409,7 @@ def test_planning_pass_fails_without_writing_deck_when_audit_fails(
     assert paths.repo_planning_audit_md_path(run_id, "test_repo").exists() is False
 
 
-def test_planning_pass_keeps_created_issues_empty_when_issue_creation_is_enabled(
+def test_planning_pass_keeps_top_level_created_issues_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     overlay_path = tmp_path / "test_repo.toml"
@@ -492,8 +423,6 @@ def test_planning_pass_keeps_created_issues_empty_when_issue_creation_is_enabled
                 "requires_notebook_execution = false",
                 'validation_commands = ["pytest -q"]',
                 'env = "default_env"',
-                "enable_planning_audit_issue_creation = true",
-                "planning_audit_issue_limit = 2",
                 "",
             ]
         ),
@@ -514,19 +443,6 @@ def test_planning_pass_keeps_created_issues_empty_when_issue_creation_is_enabled
 
     def _bd_ready(*, repo_root: Path) -> list[ReadyBead]:
         return [ReadyBead(bead_id="bd-1", title="My bead")]
-
-    def _run_validations(
-        commands,
-        *,
-        cwd: Path,
-        env: str | None = None,
-        timeout_seconds: float = 900.0,
-        output_limit_chars: int = 20_000,
-    ) -> dict[str, ValidationResult]:
-        return {
-            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
-            for cmd in commands
-        }
 
     def _build_audit(*, run_id: str, repo_policy: RepoPolicy) -> dict[str, object]:
         return {
@@ -562,7 +478,6 @@ def test_planning_pass_keeps_created_issues_empty_when_issue_creation_is_enabled
     monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
-    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
     monkeypatch.setattr(planning_pass, "build_planning_audit", _build_audit)
 
     ensure_repo_run_deck(
@@ -579,7 +494,7 @@ def test_planning_pass_keeps_created_issues_empty_when_issue_creation_is_enabled
     assert audit["created_issues"] == []
 
 
-def test_planning_pass_records_notebook_changes_without_creating_issues(
+def test_planning_pass_records_notebook_changes_in_read_only_audit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     overlay_path = tmp_path / "test_repo.toml"
@@ -593,8 +508,6 @@ def test_planning_pass_records_notebook_changes_without_creating_issues(
                 "requires_notebook_execution = false",
                 'validation_commands = ["pytest -q"]',
                 'env = "default_env"',
-                "enable_notebook_refactor_issue_creation = true",
-                "notebook_refactor_issue_limit = 2",
                 "",
             ]
         ),
@@ -616,19 +529,6 @@ def test_planning_pass_records_notebook_changes_without_creating_issues(
     def _bd_ready(*, repo_root: Path) -> list[ReadyBead]:
         return [ReadyBead(bead_id="bd-1", title="Downstream bead")]
 
-    def _run_validations(
-        commands,
-        *,
-        cwd: Path,
-        env: str | None = None,
-        timeout_seconds: float = 900.0,
-        output_limit_chars: int = 20_000,
-    ) -> dict[str, ValidationResult]:
-        return {
-            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
-            for cmd in commands
-        }
-
     def _build_audit(*, run_id: str, repo_policy: RepoPolicy) -> dict[str, object]:
         return {
             "schema_version": 1,
@@ -646,7 +546,6 @@ def test_planning_pass_records_notebook_changes_without_creating_issues(
     monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
-    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
     monkeypatch.setattr(planning_pass, "build_planning_audit", _build_audit)
     monkeypatch.setattr(planning_pass, "detect_changed_notebooks", _detect_changed_notebooks)
 
@@ -663,9 +562,6 @@ def test_planning_pass_records_notebook_changes_without_creating_issues(
     audit = json.loads(audit_json_path.read_text(encoding="utf-8"))
     assert audit["notebook_refactor"] == {
         "changed_notebooks": ["notebooks/a.ipynb"],
-        "created_issues": [],
-        "enabled": True,
-        "limit": 2,
     }
 
 
@@ -705,19 +601,6 @@ def test_planning_pass_records_commit_guidance_gap_in_audit(
     def _bd_ready(*, repo_root: Path) -> list[ReadyBead]:
         return [ReadyBead(bead_id="bd-1", title="My bead")]
 
-    def _run_validations(
-        commands,
-        *,
-        cwd: Path,
-        env: str | None = None,
-        timeout_seconds: float = 900.0,
-        output_limit_chars: int = 20_000,
-    ) -> dict[str, ValidationResult]:
-        return {
-            cmd: ValidationResult(command=cmd, exit_code=0, started_at=now, finished_at=now)
-            for cmd in commands
-        }
-
     def _guidance(*, repo_root: Path) -> CommitGuidanceResult:
         return CommitGuidanceResult(
             agents_path=repo_root / "AGENTS.md",
@@ -729,8 +612,7 @@ def test_planning_pass_records_commit_guidance_gap_in_audit(
     monkeypatch.setattr(planning_pass, "bd_init", _bd_init)
     monkeypatch.setattr(planning_pass, "bd_list_ids", _bd_list_ids)
     monkeypatch.setattr(planning_pass, "bd_ready", _bd_ready)
-    monkeypatch.setattr(planning_pass, "run_validation_commands", _run_validations)
-    monkeypatch.setattr(planning_pass, "ensure_commit_message_guidance_issue", _guidance)
+    monkeypatch.setattr(planning_pass, "inspect_commit_message_guidance", _guidance)
 
     ensure_repo_run_deck(
         paths=paths,

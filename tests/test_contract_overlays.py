@@ -132,3 +132,27 @@ def test_deny_roots_relaxation_fails(tmp_path: Path) -> None:
             known_bead_ids=set(),
         )
     assert "may not relax repo policy" in str(excinfo.value)
+
+
+def test_removed_planning_issue_creation_keys_fail_loudly(tmp_path: Path) -> None:
+    overlay = tmp_path / "test_repo.toml"
+    _write_overlay(
+        overlay,
+        "\n".join(
+            [
+                "[defaults]",
+                "enable_planning_audit_issue_creation = true",
+                "",
+            ]
+        ),
+    )
+
+    with pytest.raises(ContractOverlayError) as excinfo:
+        load_contract_overlay(
+            overlay,
+            repo_policy=_policy(tmp_path=tmp_path),
+            known_bead_ids=set(),
+        )
+
+    assert "unknown keys" in str(excinfo.value)
+    assert "enable_planning_audit_issue_creation" in str(excinfo.value)

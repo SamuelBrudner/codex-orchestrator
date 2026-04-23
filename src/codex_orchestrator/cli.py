@@ -949,20 +949,6 @@ def _render_overlay_patch_lines(patch: ContractOverlayPatch) -> list[str]:
             "enforce_given_when_then = "
             f"{'true' if patch.enforce_given_when_then else 'false'}"
         )
-    if patch.enable_planning_audit_issue_creation is not None:
-        lines.append(
-            "enable_planning_audit_issue_creation = "
-            f"{'true' if patch.enable_planning_audit_issue_creation else 'false'}"
-        )
-    if patch.planning_audit_issue_limit is not None:
-        lines.append(f"planning_audit_issue_limit = {patch.planning_audit_issue_limit}")
-    if patch.enable_notebook_refactor_issue_creation is not None:
-        lines.append(
-            "enable_notebook_refactor_issue_creation = "
-            f"{'true' if patch.enable_notebook_refactor_issue_creation else 'false'}"
-        )
-    if patch.notebook_refactor_issue_limit is not None:
-        lines.append(f"notebook_refactor_issue_limit = {patch.notebook_refactor_issue_limit}")
     if patch.allowed_roots is not None:
         lines.append(f"allowed_roots = {_toml_quote_path_list(patch.allowed_roots)}")
     if patch.deny_roots is not None:

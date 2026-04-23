@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,7 +8,6 @@ from pathlib import Path
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import (
     ReadyBead,
-    ValidationResult,
     build_run_deck,
     plan_deck_items,
     read_run_deck,
@@ -98,19 +98,10 @@ def test_planner_writes_deck_items_with_resolved_contract_snapshot(tmp_path: Pat
     assert len(planning.deck_items) == 1
 
     now = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-    baseline = ValidationResult(
-        command="pytest -q",
-        exit_code=0,
-        started_at=now,
-        finished_at=now,
-        stdout="",
-        stderr="",
-    )
     deck = build_run_deck(
         run_id="run-123",
         repo_policy=policy,
         planning=planning,
-        baseline_results_by_command={"pytest -q": baseline},
         now=now,
     )
     deck_json = deck.to_json_dict()
@@ -121,8 +112,7 @@ def test_planner_writes_deck_items_with_resolved_contract_snapshot(tmp_path: Pat
     assert deck_json["items"][0]["bead_id"] == "bd-1"
     assert deck_json["items"][0]["title"] == "My bead"
     assert deck_json["items"][0]["contract"]["env"] == "default_env"
-    assert deck_json["items"][0]["baseline_validation"][0]["command"] == "pytest -q"
-    assert deck_json["items"][0]["baseline_validation"][0]["ok"] is True
+    assert deck_json["items"][0]["baseline_validation"] == []
 
     paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
     out_path = write_run_deck(paths, deck=deck)
@@ -130,6 +120,56 @@ def test_planner_writes_deck_items_with_resolved_contract_snapshot(tmp_path: Pat
 
     written = read_run_deck(out_path)
     assert written.items[0].contract.env == "default_env"
+    assert written.items[0].baseline_validation == ()
+
+
+def test_read_run_deck_preserves_legacy_baseline_validation_entries(tmp_path: Path) -> None:
+    out_path = tmp_path / "run_deck.json"
+    out_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "run_id": "run-123",
+                "repo_id": "test_repo",
+                "created_at": "2025-01-01T00:00:00+00:00",
+                "items": [
+                    {
+                        "bead_id": "bd-1",
+                        "title": "My bead",
+                        "contract": {
+                            "time_budget_minutes": 45,
+                            "validation_commands": ["pytest -q"],
+                            "env": "default_env",
+                            "allow_env_creation": False,
+                            "requires_notebook_execution": False,
+                            "enforce_given_when_then": False,
+                            "allowed_roots": ["."],
+                            "deny_roots": [],
+                            "notebook_roots": ["notebooks"],
+                            "notebook_output_policy": "strip",
+                        },
+                        "baseline_validation": [
+                            {
+                                "command": "pytest -q",
+                                "ok": True,
+                                "exit_code": 0,
+                                "started_at": "2025-01-01T00:00:00+00:00",
+                                "finished_at": "2025-01-01T00:00:01+00:00",
+                                "stdout": "",
+                                "stderr": "",
+                            }
+                        ],
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    written = read_run_deck(out_path)
+
     assert written.items[0].baseline_validation[0].command == "pytest -q"
 
 

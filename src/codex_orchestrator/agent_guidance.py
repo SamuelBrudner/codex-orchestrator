@@ -33,7 +33,7 @@ def _guidance_present(text: str) -> bool:
     return "commit messages" in lowered and "commit message" in lowered
 
 
-def ensure_commit_message_guidance_issue(*, repo_root: Path) -> CommitGuidanceResult:
+def inspect_commit_message_guidance(*, repo_root: Path) -> CommitGuidanceResult:
     agents_path = _find_agents_path(repo_root)
     existing_text = ""
     if agents_path.exists():

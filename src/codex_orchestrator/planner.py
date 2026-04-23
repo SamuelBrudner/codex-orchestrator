@@ -373,7 +373,7 @@ def build_run_deck(
     run_id: str,
     repo_policy: RepoPolicy,
     planning: PlanningResult,
-    baseline_results_by_command: Mapping[str, ValidationResult],
+    baseline_results_by_command: Mapping[str, ValidationResult] | None = None,
     now: datetime | None = None,
 ) -> RunDeck:
     if now is None:
@@ -381,14 +381,13 @@ def build_run_deck(
     if now.tzinfo is None:
         raise PlannerError("build_run_deck requires a timezone-aware now datetime.")
 
-    missing: set[str] = set()
+    baseline_results = baseline_results_by_command or {}
     items: list[RunDeckItem] = []
     for planned in planning.deck_items:
         baseline: list[ValidationResult] = []
         for command in planned.contract.validation_commands:
-            result = baseline_results_by_command.get(command)
+            result = baseline_results.get(command)
             if result is None:
-                missing.add(command)
                 continue
             baseline.append(result)
         items.append(
@@ -399,13 +398,6 @@ def build_run_deck(
                 baseline_validation=tuple(baseline),
             )
         )
-    if missing:
-        missing_sorted = ", ".join(repr(cmd) for cmd in sorted(missing))
-        raise PlannerError(
-            f"Missing baseline validation results for commands: {missing_sorted}. "
-            "Run baseline validations before writing the deck."
-        )
-
     return RunDeck(
         schema_version=2,
         run_id=run_id,

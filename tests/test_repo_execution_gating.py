@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import codex_orchestrator.repo_execution as repo_execution
+from codex_orchestrator.codex_subprocess import CodexInvocation
 from codex_orchestrator.contracts import ResolvedExecutionContract
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import RunDeck, RunDeckItem, ValidationResult, write_run_deck
@@ -618,3 +619,141 @@ def test_retry_loop_stops_when_bead_closes_between_attempts(
     ]
     codex_starts = [event for event in events if event.get("type") == "codex_start"]
     assert len(codex_starts) == 1
+
+
+def test_runtime_baseline_is_captured_once_and_reused_across_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_fake_tools(tmp_path, monkeypatch)
+    repo_root, policy = _setup_repo(tmp_path)
+    _write_fake_issues(repo_root, ["bd-1"])
+
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "20250101-000000-deadbeef"
+    contract = ResolvedExecutionContract(
+        time_budget_minutes=10,
+        validation_commands=("pytest -q",),
+        env="test",
+        allow_env_creation=False,
+        requires_notebook_execution=False,
+        allowed_roots=(Path("."),),
+        deny_roots=(),
+        notebook_roots=(Path("."),),
+        notebook_output_policy="strip",
+    )
+    deck = RunDeck(
+        schema_version=2,
+        run_id=run_id,
+        repo_id="test_repo",
+        created_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        items=(
+            RunDeckItem(
+                bead_id="bd-1",
+                title="Bead bd-1",
+                contract=contract,
+                baseline_validation=(),
+            ),
+        ),
+    )
+    write_run_deck(paths, deck=deck)
+
+    prompts: list[str] = []
+    pytest_calls = {"n": 0}
+
+    def _fake_codex(
+        *,
+        prompt: str,
+        cwd: Path,
+        timeout_seconds: float,
+        extra_args: tuple[str, ...] = (),
+        output_limit_chars: int = 200_000,
+        on_start=None,
+    ) -> CodexInvocation:
+        del timeout_seconds, extra_args, output_limit_chars, on_start
+        prompts.append(prompt)
+        started_at = datetime.now().astimezone()
+        (cwd / "work.txt").write_text(f"attempt {len(prompts)}\n", encoding="utf-8")
+        return CodexInvocation(
+            args=("codex", "exec"),
+            pid=4321,
+            started_at=started_at,
+            finished_at=started_at,
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
+
+    def _fake_validation(
+        commands: tuple[str, ...] | list[str],
+        *,
+        cwd: Path,
+        env: str | None = None,
+        timeout_seconds: float = 900.0,
+        output_limit_chars: int = 20_000,
+    ) -> dict[str, ValidationResult]:
+        del cwd, env, timeout_seconds, output_limit_chars
+        now = datetime.now().astimezone()
+        out: dict[str, ValidationResult] = {}
+        for command in commands:
+            if command != "pytest -q":
+                out[command] = ValidationResult(
+                    command=command,
+                    exit_code=0,
+                    started_at=now,
+                    finished_at=now,
+                    stdout="",
+                    stderr="",
+                )
+                continue
+            pytest_calls["n"] += 1
+            stderr = (
+                "baseline failure"
+                if pytest_calls["n"] == 1
+                else f"attempt {pytest_calls['n'] - 1} failed"
+            )
+            out[command] = ValidationResult(
+                command=command,
+                exit_code=1,
+                started_at=now,
+                finished_at=now,
+                stdout="",
+                stderr=stderr,
+            )
+        return out
+
+    retry_calls = {"n": 0}
+
+    def _can_retry(*, tick: TickBudget, now: datetime, bead_deadline: datetime) -> bool:
+        del tick, now, bead_deadline
+        retry_calls["n"] += 1
+        return retry_calls["n"] == 1
+
+    monkeypatch.setattr(repo_execution, "codex_exec_full_auto", _fake_codex)
+    monkeypatch.setattr(repo_execution, "run_validation_commands", _fake_validation)
+    monkeypatch.setattr(repo_execution, "_can_retry_validation", _can_retry)
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=10))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=10),
+            min_minutes_to_start_new_bead=0,
+            max_beads_per_tick=1,
+            diff_caps=DiffCaps(max_files_changed=50, max_lines_added=500),
+        ),
+    )
+
+    assert result.skipped is False
+    assert result.stop_reason == "blocked"
+    assert pytest_calls["n"] == 3
+    assert len(prompts) == 2
+    assert "Baseline validation failures (before this bead):" in prompts[0]
+    assert "- pytest -q: exit=1" in prompts[0]
+    assert "Validation failures after attempt 1:" in prompts[1]
+    assert "Baseline failures still present:" in prompts[1]
+

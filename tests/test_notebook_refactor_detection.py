@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from codex_orchestrator.notebook_refactor_issues import detect_changed_notebooks
+from codex_orchestrator.notebook_changes import detect_changed_notebooks
 
 
 def _git(repo_root: Path, *args: str) -> None:
@@ -39,4 +39,3 @@ def test_detect_changed_notebooks_includes_modified_and_untracked(tmp_path: Path
 
     changed = detect_changed_notebooks(repo_root=tmp_path, notebook_roots=(Path("notebooks"),))
     assert changed == ("notebooks/tracked.ipynb", "notebooks/untracked.ipynb")
-
