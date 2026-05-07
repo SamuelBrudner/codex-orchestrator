@@ -6,11 +6,11 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 from codex_orchestrator.audit_trail import write_json_atomic
 from codex_orchestrator.night_window import DEFAULT_NIGHT_WINDOW
 from codex_orchestrator.paths import OrchestratorPaths
+from codex_orchestrator.run_artifacts import read_json
 from codex_orchestrator.run_lock import RunLock, RunLockError
 from codex_orchestrator.run_signoff import (
     RunSignoffError,
@@ -44,14 +44,9 @@ def _generate_run_id(*, now: datetime) -> str:
     return f"{ts}-{secrets.token_hex(4)}"
 
 
-def _read_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
 def _load_current_run_state(*, path: Path, now: datetime) -> CurrentRunState | None:
     try:
-        data = _read_json(path)
+        data = read_json(path)
     except FileNotFoundError:
         return None
     except json.JSONDecodeError as e:
@@ -69,7 +64,7 @@ def _load_current_run_state(*, path: Path, now: datetime) -> CurrentRunState | N
 
 def _read_lock_pid(lock_path: Path) -> int | None:
     try:
-        payload = _read_json(lock_path)
+        payload = read_json(lock_path)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
     if not isinstance(payload, dict):
@@ -109,7 +104,7 @@ def _recover_orphaned_current_run(paths: OrchestratorPaths, *, now: datetime) ->
     if owner_pid is None:
         return None
     try:
-        marker_payload = _read_json(paths.cycle_in_progress_path)
+        marker_payload = read_json(paths.cycle_in_progress_path)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
     if not isinstance(marker_payload, dict):

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -9,22 +8,12 @@ from typing import Any
 
 from codex_orchestrator.audit_trail import write_json_atomic, write_text_atomic
 from codex_orchestrator.paths import OrchestratorPaths
+from codex_orchestrator.run_artifacts import read_json_or_none
 from codex_orchestrator.run_closure_review import RunClosureReviewError, write_final_review
 
 
 class RunSignoffError(RuntimeError):
     pass
-
-
-def _read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except json.JSONDecodeError as e:
-        raise RunSignoffError(f"Failed to parse JSON in {path}: {e}") from e
-    except OSError as e:
-        raise RunSignoffError(f"Failed to read {path}: {e}") from e
 
 
 def _parse_datetime(value: Any, *, field: str) -> datetime:
@@ -137,7 +126,7 @@ def find_latest_ended_run_id(paths: OrchestratorPaths) -> str | None:
             continue
         run_id = run_dir.name
         end_path = paths.run_end_path(run_id)
-        end_payload = _read_json(end_path)
+        end_payload = read_json_or_none(end_path, error_type=RunSignoffError)
         if not isinstance(end_payload, dict):
             continue
         ended_at = _parse_datetime(end_payload.get("ended_at"), field=f"{end_path}.ended_at")
@@ -202,7 +191,7 @@ def write_run_signoff(
 
 
 def load_run_signoff(paths: OrchestratorPaths, *, run_id: str) -> RunSignoff | None:
-    payload = _read_json(paths.run_signoff_json_path(run_id))
+    payload = read_json_or_none(paths.run_signoff_json_path(run_id), error_type=RunSignoffError)
     if payload is None:
         return None
     return RunSignoff.from_json_dict(payload)

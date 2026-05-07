@@ -172,6 +172,57 @@ def test_init_repo_existing_repo_id_requires_allow_existing(tmp_path: Path) -> N
     assert "already exists" in result.stderr
 
 
+def test_init_repo_preserves_existing_repos_toml_comments(tmp_path: Path) -> None:
+    existing_repo = tmp_path / "existing_repo"
+    existing_repo.mkdir()
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir()
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "repos.toml").write_text(
+        "\n".join(
+            [
+                "# keep this inventory comment",
+                "",
+                "[repos.existing_repo]",
+                f'path = "{existing_repo.as_posix()}"',
+                'base_branch = "main"',
+                'env = "existing_env"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    bd_bin = _install_bd_stub(tmp_path=tmp_path)
+    env = {
+        "PATH": str(bd_bin) + os.pathsep + os.environ.get("PATH", ""),
+        "BD_STUB_LIST_JSON": "[]",
+        "BD_STUB_READY_JSON": "[]",
+    }
+    result = _run_cli(
+        cwd=tmp_path,
+        env_overrides=env,
+        args=[
+            "init-repo",
+            "--repo-id",
+            "test_repo",
+            "--path",
+            target_repo.as_posix(),
+            "--env",
+            "my_env",
+            "--base-branch",
+            "main",
+        ],
+    )
+
+    assert result.returncode == 0, result.stderr
+    repos_text = (tmp_path / "config" / "repos.toml").read_text(encoding="utf-8")
+    assert "# keep this inventory comment" in repos_text
+    assert "[repos.existing_repo]" in repos_text
+    assert "[repos.test_repo]" in repos_text
+
+
 def test_init_repo_allow_existing_bootstraps_overlay(tmp_path: Path) -> None:
     target_repo = tmp_path / "target_repo"
     target_repo.mkdir()

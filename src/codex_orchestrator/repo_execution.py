@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import fnmatch
-import json
 import os
 import re
 import shlex
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -57,6 +56,7 @@ from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import RunDeckItem, ValidationResult
 from codex_orchestrator.planning_pass import ensure_repo_run_deck
 from codex_orchestrator.repo_inventory import RepoPolicy
+from codex_orchestrator.run_artifacts import read_json_object, write_run_summary_from_repo_summaries
 from codex_orchestrator.run_lock import RunLock, RunLockError
 from codex_orchestrator.summary_utils import (
     merge_records_by_keys,
@@ -179,6 +179,24 @@ class RepoTickResult:
     beads_attempted: int
     beads_closed: int
     bead_results: tuple[BeadResult, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RepoTickContext:
+    paths: OrchestratorPaths
+    run_id: str
+    repo_policy: RepoPolicy
+    config: RepoExecutionConfig
+    run_dir: Path
+    run_log_path: Path
+    exec_log_path: Path
+    stdout_log_path: Path
+    stderr_log_path: Path
+    events_path: Path
+    summary_path: Path
+    planning_audit_json_path: Path
+    planning_audit_md_path: Path
+    tool_versions: dict[str, str]
 
 
 def _which(tool: str) -> str | None:
@@ -897,32 +915,6 @@ def _infer_next_action(
     return "Inspect logs."
 
 
-def _write_run_summary(paths: OrchestratorPaths, *, run_id: str) -> None:
-    run_dir = paths.run_dir(run_id)
-    summaries: list[dict[str, Any]] = []
-    for summary_path in sorted(run_dir.glob("*.summary.json")):
-        try:
-            data = json.loads(summary_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            summaries.append(data)
-    write_json_atomic(
-        paths.run_summary_path(run_id),
-        {"schema_version": 1, "run_id": run_id, "repos": summaries},
-    )
-
-
-def _load_json_object(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _summary_int(value: Any) -> int:
     return summary_int(value)
 
@@ -1407,6 +1399,98 @@ def _try_commit_run_report(
     return True
 
 
+def _record_diff_cap_failure(
+    *,
+    repo_root: Path,
+    issue: Any,
+    item: RunDeckItem,
+    run_id: str,
+    attempt: int,
+    audit_kind: Literal["files_changed", "lines_added"],
+    cap_kind: str,
+    files_changed: int,
+    lines_added: int,
+    tick_files_changed: int,
+    tick_lines_added: int,
+    max_files_changed: int,
+    max_lines_added: int,
+    changed_paths: Sequence[str],
+    deck_path: Path | None,
+    replan: bool,
+    bead_results: list[BeadResult],
+    bead_audits: list[dict[str, Any]],
+    repo_failures: list[str],
+    follow_ups: list[str],
+) -> None:
+    cap_summary, followup_ids = _maybe_decompose_diff_cap_bead(
+        repo_root=repo_root,
+        issue=issue,
+        item=item,
+        run_id=run_id,
+        attempt=attempt,
+        cap_kind=cap_kind,
+        files_changed=files_changed,
+        lines_added=lines_added,
+        tick_files_changed=tick_files_changed,
+        tick_lines_added=tick_lines_added,
+        max_files_changed=max_files_changed,
+        max_lines_added=max_lines_added,
+        changed_paths=changed_paths,
+    )
+    extra_notes = ""
+    if cap_summary:
+        extra_notes += "\n" + cap_summary
+    if followup_ids:
+        extra_notes += "\n" + _DECOMPOSE_MARKER + ": " + ", ".join(sorted(followup_ids))
+        follow_ups.append(
+            f"Diff cap decomposition for {item.bead_id}: created "
+            + ", ".join(sorted(followup_ids))
+        )
+        if deck_path is not None and not replan:
+            try:
+                deck_path.unlink(missing_ok=True)
+                follow_ups.append(f"Cleared run deck to force replan: {deck_path.as_posix()}")
+            except OSError as e:
+                repo_failures.append(f"{item.bead_id}: failed to clear run deck {deck_path}: {e}")
+
+    metric_name = "tick_files_changed" if audit_kind == "files_changed" else "tick_lines_added"
+    metric_value = tick_files_changed if audit_kind == "files_changed" else tick_lines_added
+    metric_max = max_files_changed if audit_kind == "files_changed" else max_lines_added
+    detail_suffix = "files changed" if audit_kind == "files_changed" else "lines added"
+    detail = f"Diff cap exceeded ({detail_suffix})."
+
+    _append_issue_failure_note(
+        repo_root=repo_root,
+        issue_id=item.bead_id,
+        status="blocked" if followup_ids else None,
+        note="[orchestrator] Diff cap exceeded: "
+        + f"{metric_name}={metric_value} "
+        + f"max={metric_max}"
+        + extra_notes,
+        reopen_closed=True,
+    )
+    _record_failed_bead(
+        bead_results,
+        bead_audits,
+        item=item,
+        detail=detail,
+        changed_paths=changed_paths,
+        extra_audit={
+            "diff_cap": {
+                "kind": audit_kind,
+                "files_changed": files_changed,
+                "lines_added": lines_added,
+                "tick_files_changed": tick_files_changed,
+                "tick_lines_added": tick_lines_added,
+                "max_files_changed": max_files_changed,
+                "max_lines_added": max_lines_added,
+            },
+            "followups": list(followup_ids) if followup_ids else [],
+        },
+    )
+    repo_failures.append(f"{item.bead_id}: diff cap exceeded ({detail_suffix}).")
+
+
 def _ordered_remotes(remotes: Sequence[str]) -> list[str]:
     preferred = ("origin", "upstream")
     ordered: list[str] = []
@@ -1507,6 +1591,192 @@ def _now() -> datetime:
     return now
 
 
+def _make_repo_tick_context(
+    *,
+    paths: OrchestratorPaths,
+    run_id: str,
+    repo_policy: RepoPolicy,
+    config: RepoExecutionConfig,
+) -> RepoTickContext:
+    run_dir = paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return RepoTickContext(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=repo_policy,
+        config=config,
+        run_dir=run_dir,
+        run_log_path=paths.run_log_path(run_id),
+        exec_log_path=paths.repo_exec_log_path(run_id, repo_policy.repo_id),
+        stdout_log_path=paths.repo_stdout_log_path(run_id, repo_policy.repo_id),
+        stderr_log_path=paths.repo_stderr_log_path(run_id, repo_policy.repo_id),
+        events_path=paths.repo_events_path(run_id, repo_policy.repo_id),
+        summary_path=paths.repo_summary_path(run_id, repo_policy.repo_id),
+        planning_audit_json_path=paths.repo_planning_audit_json_path(run_id, repo_policy.repo_id),
+        planning_audit_md_path=paths.repo_planning_audit_md_path(run_id, repo_policy.repo_id),
+        tool_versions=collect_tool_versions(safe_cwd=paths.cache_dir),
+    )
+
+
+def _ensure_repo_tick_files(context: RepoTickContext) -> None:
+    for path in (
+        context.run_log_path,
+        context.exec_log_path,
+        context.stdout_log_path,
+        context.stderr_log_path,
+        context.events_path,
+    ):
+        _write_text_if_missing(path)
+
+
+def _skip_repo_tick_result(
+    *,
+    repo_id: str,
+    run_id: str,
+    skip_reason: RepoSkipReason,
+) -> RepoTickResult:
+    return RepoTickResult(
+        repo_id=repo_id,
+        run_id=run_id,
+        branch=None,
+        skipped=True,
+        skip_reason=skip_reason,
+        stop_reason=None,
+        beads_attempted=0,
+        beads_closed=0,
+        bead_results=(),
+    )
+
+
+def _cleanup_dirty_ignored_paths(
+    *,
+    repo_root: Path,
+    dirty_cleanup: bool,
+    dirty_ignore_globs: Sequence[str],
+    exec_log_path: Path,
+    emit: Callable[..., None],
+) -> None:
+    if not dirty_cleanup or not dirty_ignore_globs:
+        return
+    try:
+        restored_paths = git_restore_tracked(
+            repo_root=repo_root,
+            ignore_globs=dirty_ignore_globs,
+        )
+        removed_paths = git_remove_ignored_untracked(
+            repo_root=repo_root,
+            ignore_globs=dirty_ignore_globs,
+        )
+    except GitError as e:
+        _append_log(
+            exec_log_path,
+            f"{_now().isoformat()} dirty_cleanup_failed error={e}",
+        )
+        emit("repo_dirty_cleanup_failed", error=str(e))
+        return
+
+    if restored_paths:
+        _append_log(
+            exec_log_path,
+            f"{_now().isoformat()} dirty_cleanup_restored count={len(restored_paths)}",
+        )
+        emit("repo_dirty_cleanup_restored", restored=restored_paths)
+    if removed_paths:
+        _append_log(
+            exec_log_path,
+            f"{_now().isoformat()} dirty_cleanup_removed count={len(removed_paths)}",
+        )
+        emit("repo_dirty_cleanup", removed=removed_paths)
+
+
+def _build_repo_summary_payload(
+    *,
+    context: RepoTickContext,
+    branch: str | None,
+    skipped: bool,
+    skip_reason: RepoSkipReason | None,
+    stop_reason: RepoStopReason | None,
+    beads_attempted: int,
+    beads_closed: int,
+    deck_path: Path | None,
+    reused_existing_deck: bool | None,
+    run_report_path: Path | None,
+    bead_audits: Sequence[dict[str, Any]],
+    planning_skipped: Sequence[dict[str, str]],
+    repo_failures: Sequence[str],
+    follow_ups: Sequence[str],
+    prompt_records: Sequence[dict[str, object]],
+    validation_status_by_command: Mapping[str, str],
+    notebooks_touched: set[str],
+    extracted_code_touched: set[str],
+    planned_scope: Sequence[dict[str, str]],
+) -> dict[str, Any]:
+    next_action = _infer_next_action(
+        skipped=skipped,
+        skip_reason=skip_reason,
+        stop_reason=stop_reason,
+        bead_audits=bead_audits,
+    )
+    codex_argv = (
+        "codex",
+        "exec",
+        "--full-auto",
+        *codex_cli_args_for_settings(context.config.ai_settings),
+    )
+    return {
+        "schema_version": 1,
+        "run_id": context.run_id,
+        "repo_id": context.repo_policy.repo_id,
+        "repo_path": context.repo_policy.path.as_posix(),
+        "branch": branch,
+        "skipped": skipped,
+        "skip_reason": skip_reason,
+        "stop_reason": stop_reason,
+        "beads_attempted": beads_attempted,
+        "beads_closed": beads_closed,
+        "deck_path": deck_path.as_posix() if deck_path is not None else None,
+        "reused_existing_deck": reused_existing_deck,
+        "planning_audit": {
+            "json_path": context.planning_audit_json_path.as_posix(),
+            "md_path": context.planning_audit_md_path.as_posix(),
+            "json_exists": context.planning_audit_json_path.exists(),
+            "md_exists": context.planning_audit_md_path.exists(),
+        },
+        "run_report_path": run_report_path.as_posix() if run_report_path is not None else None,
+        "beads": list(bead_audits),
+        "planning_skipped_beads": list(planning_skipped),
+        "failures": list(repo_failures),
+        "follow_ups": list(follow_ups),
+        "prompts": list(prompt_records),
+        "validations": [
+            {"command": cmd, "status": status}
+            for cmd, status in sorted(validation_status_by_command.items())
+        ],
+        "notebook_refactors": {
+            "notebooks": sorted(notebooks_touched),
+            "extracted_code": sorted(extracted_code_touched),
+        },
+        "high_level_context": {
+            "focus": context.config.focus,
+            "planned_beads": list(planned_scope),
+            "replan_requested": bool(context.config.replan),
+            "reused_existing_deck": reused_existing_deck,
+            "planning_skipped_count": len(planning_skipped),
+            "safety": {
+                "max_beads_per_tick": context.config.max_beads_per_tick,
+                "min_minutes_to_start_new_bead": context.config.min_minutes_to_start_new_bead,
+                "diff_cap_files": context.config.diff_caps.max_files_changed,
+                "diff_cap_lines": context.config.diff_caps.max_lines_added,
+            },
+        },
+        "ai_settings": context.config.ai_settings.to_json_dict(),
+        "codex_command": shlex.join(codex_argv),
+        "codex_argv": list(codex_argv),
+        "tool_versions": context.tool_versions,
+        "next_action": next_action,
+    }
+
+
 def execute_repo_tick(
     *,
     paths: OrchestratorPaths,
@@ -1520,20 +1790,20 @@ def execute_repo_tick(
         started_at = _now()
         tick = TickBudget(started_at=started_at, ends_at=started_at + config.tick_budget)
 
-    run_dir = paths.run_dir(run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    run_log_path = paths.run_log_path(run_id)
-
-    exec_log_path = paths.repo_exec_log_path(run_id, repo_policy.repo_id)
-    stdout_log_path = paths.repo_stdout_log_path(run_id, repo_policy.repo_id)
-    stderr_log_path = paths.repo_stderr_log_path(run_id, repo_policy.repo_id)
-    events_path = paths.repo_events_path(run_id, repo_policy.repo_id)
-    summary_path = paths.repo_summary_path(run_id, repo_policy.repo_id)
-    for p in (run_log_path, exec_log_path, stdout_log_path, stderr_log_path, events_path):
-        _write_text_if_missing(p)
-
-    tool_versions = collect_tool_versions(safe_cwd=paths.cache_dir)
+    context = _make_repo_tick_context(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=repo_policy,
+        config=config,
+    )
+    _ensure_repo_tick_files(context)
+    run_log_path = context.run_log_path
+    exec_log_path = context.exec_log_path
+    stdout_log_path = context.stdout_log_path
+    stderr_log_path = context.stderr_log_path
+    events_path = context.events_path
+    summary_path = context.summary_path
+    tool_versions = context.tool_versions
     bead_audits: list[dict[str, Any]] = []
     planning_skipped: list[dict[str, str]] = []
     validation_status_by_command: dict[str, str] = {}
@@ -1553,8 +1823,6 @@ def execute_repo_tick(
     beads_closed = 0
     stop_reason: RepoStopReason | None = None
 
-    planning_audit_json_path = paths.repo_planning_audit_json_path(run_id, repo_policy.repo_id)
-    planning_audit_md_path = paths.repo_planning_audit_md_path(run_id, repo_policy.repo_id)
     events_lock = threading.Lock()
 
     def emit(event_type: str, **fields: Any) -> None:
@@ -1570,70 +1838,27 @@ def execute_repo_tick(
             append_jsonl(events_path, payload)
 
     def _current_summary_payload(*, branch: str | None) -> dict[str, Any]:
-        next_action = _infer_next_action(
+        return _build_repo_summary_payload(
+            context=context,
+            branch=branch,
             skipped=False,
             skip_reason=None,
             stop_reason=stop_reason,
+            beads_attempted=beads_attempted,
+            beads_closed=beads_closed,
+            deck_path=deck_path,
+            reused_existing_deck=reused_existing_deck,
+            run_report_path=run_report_path,
             bead_audits=bead_audits,
+            planning_skipped=planning_skipped,
+            repo_failures=repo_failures,
+            follow_ups=follow_ups,
+            prompt_records=prompt_records,
+            validation_status_by_command=validation_status_by_command,
+            notebooks_touched=notebooks_touched,
+            extracted_code_touched=extracted_code_touched,
+            planned_scope=planned_scope,
         )
-        codex_argv = (
-            "codex",
-            "exec",
-            "--full-auto",
-            *codex_cli_args_for_settings(config.ai_settings),
-        )
-        return {
-            "schema_version": 1,
-            "run_id": run_id,
-            "repo_id": repo_policy.repo_id,
-            "repo_path": repo_policy.path.as_posix(),
-            "branch": branch,
-            "skipped": False,
-            "skip_reason": None,
-            "stop_reason": stop_reason,
-            "beads_attempted": beads_attempted,
-            "beads_closed": beads_closed,
-            "deck_path": deck_path.as_posix() if deck_path is not None else None,
-            "reused_existing_deck": reused_existing_deck,
-            "planning_audit": {
-                "json_path": planning_audit_json_path.as_posix(),
-                "md_path": planning_audit_md_path.as_posix(),
-                "json_exists": planning_audit_json_path.exists(),
-                "md_exists": planning_audit_md_path.exists(),
-            },
-            "run_report_path": run_report_path.as_posix() if run_report_path is not None else None,
-            "beads": bead_audits,
-            "planning_skipped_beads": planning_skipped,
-            "failures": repo_failures,
-            "follow_ups": follow_ups,
-            "prompts": prompt_records,
-            "validations": [
-                {"command": cmd, "status": status}
-                for cmd, status in sorted(validation_status_by_command.items())
-            ],
-            "notebook_refactors": {
-                "notebooks": sorted(notebooks_touched),
-                "extracted_code": sorted(extracted_code_touched),
-            },
-            "high_level_context": {
-                "focus": config.focus,
-                "planned_beads": list(planned_scope),
-                "replan_requested": bool(config.replan),
-                "reused_existing_deck": reused_existing_deck,
-                "planning_skipped_count": len(planning_skipped),
-                "safety": {
-                    "max_beads_per_tick": config.max_beads_per_tick,
-                    "min_minutes_to_start_new_bead": config.min_minutes_to_start_new_bead,
-                    "diff_cap_files": config.diff_caps.max_files_changed,
-                    "diff_cap_lines": config.diff_caps.max_lines_added,
-                },
-            },
-            "ai_settings": config.ai_settings.to_json_dict(),
-            "codex_command": shlex.join(codex_argv),
-            "codex_argv": list(codex_argv),
-            "tool_versions": tool_versions,
-            "next_action": next_action,
-        }
 
     def maybe_write_repo_report(
         *,
@@ -1660,7 +1885,7 @@ def execute_repo_tick(
             dict(summary)
             if summary is not None
             else _merge_repo_summary(
-                _load_json_object(summary_path),
+                read_json_object(summary_path),
                 _current_summary_payload(branch=branch),
             )
         )
@@ -1716,74 +1941,32 @@ def execute_repo_tick(
         return run_report_path
 
     def finalize(result: RepoTickResult) -> RepoTickResult:
-        next_action = _infer_next_action(
+        current_summary = _build_repo_summary_payload(
+            context=context,
+            branch=result.branch,
             skipped=result.skipped,
             skip_reason=result.skip_reason,
             stop_reason=result.stop_reason,
+            beads_attempted=result.beads_attempted,
+            beads_closed=result.beads_closed,
+            deck_path=deck_path,
+            reused_existing_deck=reused_existing_deck,
+            run_report_path=run_report_path,
             bead_audits=bead_audits,
+            planning_skipped=planning_skipped,
+            repo_failures=repo_failures,
+            follow_ups=follow_ups,
+            prompt_records=prompt_records,
+            validation_status_by_command=validation_status_by_command,
+            notebooks_touched=notebooks_touched,
+            extracted_code_touched=extracted_code_touched,
+            planned_scope=planned_scope,
         )
-        codex_argv = (
-            "codex",
-            "exec",
-            "--full-auto",
-            *codex_cli_args_for_settings(config.ai_settings),
-        )
-        current_summary = {
-            "schema_version": 1,
-            "run_id": run_id,
-            "repo_id": repo_policy.repo_id,
-            "repo_path": repo_policy.path.as_posix(),
-            "branch": result.branch,
-            "skipped": result.skipped,
-            "skip_reason": result.skip_reason,
-            "stop_reason": result.stop_reason,
-            "beads_attempted": result.beads_attempted,
-            "beads_closed": result.beads_closed,
-            "deck_path": deck_path.as_posix() if deck_path is not None else None,
-            "reused_existing_deck": reused_existing_deck,
-            "planning_audit": {
-                "json_path": planning_audit_json_path.as_posix(),
-                "md_path": planning_audit_md_path.as_posix(),
-                "json_exists": planning_audit_json_path.exists(),
-                "md_exists": planning_audit_md_path.exists(),
-            },
-            "run_report_path": run_report_path.as_posix() if run_report_path is not None else None,
-            "beads": bead_audits,
-            "planning_skipped_beads": planning_skipped,
-            "failures": repo_failures,
-            "follow_ups": follow_ups,
-            "prompts": prompt_records,
-            "validations": [
-                {"command": cmd, "status": status}
-                for cmd, status in sorted(validation_status_by_command.items())
-            ],
-            "notebook_refactors": {
-                "notebooks": sorted(notebooks_touched),
-                "extracted_code": sorted(extracted_code_touched),
-            },
-            "high_level_context": {
-                "focus": config.focus,
-                "planned_beads": list(planned_scope),
-                "replan_requested": bool(config.replan),
-                "reused_existing_deck": reused_existing_deck,
-                "planning_skipped_count": len(planning_skipped),
-                "safety": {
-                    "max_beads_per_tick": config.max_beads_per_tick,
-                    "min_minutes_to_start_new_bead": config.min_minutes_to_start_new_bead,
-                    "diff_cap_files": config.diff_caps.max_files_changed,
-                    "diff_cap_lines": config.diff_caps.max_lines_added,
-                },
-            },
-            "ai_settings": config.ai_settings.to_json_dict(),
-            "codex_command": shlex.join(codex_argv),
-            "codex_argv": list(codex_argv),
-            "tool_versions": tool_versions,
-            "next_action": next_action,
-        }
-        existing_summary = _load_json_object(summary_path)
+        next_action = str(current_summary.get("next_action") or "")
+        existing_summary = read_json_object(summary_path)
         summary = _merge_repo_summary(existing_summary, current_summary)
         write_json_atomic(summary_path, summary)
-        _write_run_summary(paths, run_id=run_id)
+        write_run_summary_from_repo_summaries(paths, run_id=run_id)
         _append_log(
             run_log_path,
             f"{_now().isoformat()} repo_end repo_id={repo_policy.repo_id} "
@@ -1817,35 +2000,13 @@ def execute_repo_tick(
             if dirty_resolution.detected:
                 emit("repo_dirty_ignore_detected", globs=list(dirty_resolution.detected))
 
-            if repo_policy.dirty_cleanup and dirty_ignore_globs:
-                try:
-                    restored_paths = git_restore_tracked(
-                        repo_root=repo_policy.path,
-                        ignore_globs=dirty_ignore_globs,
-                    )
-                    removed_paths = git_remove_ignored_untracked(
-                        repo_root=repo_policy.path,
-                        ignore_globs=dirty_ignore_globs,
-                    )
-                except GitError as e:
-                    _append_log(
-                        exec_log_path,
-                        f"{_now().isoformat()} dirty_cleanup_failed error={e}",
-                    )
-                    emit("repo_dirty_cleanup_failed", error=str(e))
-                else:
-                    if restored_paths:
-                        _append_log(
-                            exec_log_path,
-                            f"{_now().isoformat()} dirty_cleanup_restored count={len(restored_paths)}",
-                        )
-                        emit("repo_dirty_cleanup_restored", restored=restored_paths)
-                    if removed_paths:
-                        _append_log(
-                            exec_log_path,
-                            f"{_now().isoformat()} dirty_cleanup_removed count={len(removed_paths)}",
-                        )
-                        emit("repo_dirty_cleanup", removed=removed_paths)
+            _cleanup_dirty_ignored_paths(
+                repo_root=repo_policy.path,
+                dirty_cleanup=repo_policy.dirty_cleanup,
+                dirty_ignore_globs=dirty_ignore_globs,
+                exec_log_path=exec_log_path,
+                emit=emit,
+            )
 
             try:
                 run_branch, fetch_error = _ensure_run_branch(
@@ -1857,62 +2018,19 @@ def execute_repo_tick(
             except RepoExecutionError as e:
                 msg = str(e)
                 if "dirty" in msg:
-                    emit("repo_skipped", reason="git_dirty", error=msg)
-                    return finalize(
-                        RepoTickResult(
-                            repo_id=repo_policy.repo_id,
-                            run_id=run_id,
-                            branch=None,
-                            skipped=True,
-                            skip_reason="git_dirty",
-                            stop_reason=None,
-                            beads_attempted=0,
-                            beads_closed=0,
-                            bead_results=(),
-                        )
-                    )
-                if "detached" in msg:
-                    emit("repo_skipped", reason="git_detached", error=msg)
-                    return finalize(
-                        RepoTickResult(
-                            repo_id=repo_policy.repo_id,
-                            run_id=run_id,
-                            branch=None,
-                            skipped=True,
-                            skip_reason="git_detached",
-                            stop_reason=None,
-                            beads_attempted=0,
-                            beads_closed=0,
-                            bead_results=(),
-                        )
-                    )
-                if "fetch" in msg:
-                    emit("repo_skipped", reason="git_fetch_failed", error=msg)
-                    return finalize(
-                        RepoTickResult(
-                            repo_id=repo_policy.repo_id,
-                            run_id=run_id,
-                            branch=None,
-                            skipped=True,
-                            skip_reason="git_fetch_failed",
-                            stop_reason=None,
-                            beads_attempted=0,
-                            beads_closed=0,
-                            bead_results=(),
-                        )
-                    )
-                emit("repo_skipped", reason="git_branch_failed", error=msg)
+                    skip_reason: RepoSkipReason = "git_dirty"
+                elif "detached" in msg:
+                    skip_reason = "git_detached"
+                elif "fetch" in msg:
+                    skip_reason = "git_fetch_failed"
+                else:
+                    skip_reason = "git_branch_failed"
+                emit("repo_skipped", reason=skip_reason, error=msg)
                 return finalize(
-                    RepoTickResult(
+                    _skip_repo_tick_result(
                         repo_id=repo_policy.repo_id,
                         run_id=run_id,
-                        branch=None,
-                        skipped=True,
-                        skip_reason="git_branch_failed",
-                        stop_reason=None,
-                        beads_attempted=0,
-                        beads_closed=0,
-                        bead_results=(),
+                        skip_reason=skip_reason,
                     )
                 )
 
@@ -2396,12 +2514,13 @@ def execute_repo_tick(
                         break
 
                     if tick_files_changed + files_changed > config.diff_caps.max_files_changed:
-                        cap_summary, followup_ids = _maybe_decompose_diff_cap_bead(
+                        _record_diff_cap_failure(
                             repo_root=repo_policy.path,
                             issue=issue,
                             item=item,
                             run_id=run_id,
                             attempt=attempt,
+                            audit_kind="files_changed",
                             cap_kind="files changed",
                             files_changed=files_changed,
                             lines_added=lines_added,
@@ -2410,80 +2529,25 @@ def execute_repo_tick(
                             max_files_changed=config.diff_caps.max_files_changed,
                             max_lines_added=config.diff_caps.max_lines_added,
                             changed_paths=changed_paths,
+                            deck_path=deck_path,
+                            replan=config.replan,
+                            bead_results=bead_results,
+                            bead_audits=bead_audits,
+                            repo_failures=repo_failures,
+                            follow_ups=follow_ups,
                         )
-                        extra_notes = ""
-                        if cap_summary:
-                            extra_notes += "\n" + cap_summary
-                        if followup_ids:
-                            extra_notes += (
-                                "\n"
-                                + _DECOMPOSE_MARKER
-                                + ": "
-                                + ", ".join(sorted(followup_ids))
-                            )
-                            follow_ups.append(
-                                f"Diff cap decomposition for {item.bead_id}: created "
-                                + ", ".join(sorted(followup_ids))
-                            )
-                            if deck_path is not None and not config.replan:
-                                try:
-                                    deck_path.unlink(missing_ok=True)
-                                    follow_ups.append(
-                                        f"Cleared run deck to force replan: {deck_path.as_posix()}"
-                                    )
-                                except OSError as e:
-                                    repo_failures.append(
-                                        f"{item.bead_id}: failed to clear run deck {deck_path}: {e}"
-                                    )
-                        _append_issue_failure_note(
-                            repo_root=repo_policy.path,
-                            issue_id=item.bead_id,
-                            status="blocked" if followup_ids else None,
-                            note="[orchestrator] Diff cap exceeded: "
-                            + f"tick_files_changed={tick_files_changed + files_changed} "
-                            + f"max={config.diff_caps.max_files_changed}"
-                            + extra_notes,
-                            reopen_closed=True,
-                        )
-                        bead_results.append(
-                            BeadResult(
-                                bead_id=item.bead_id,
-                                title=item.title,
-                                outcome="failed",
-                                detail="Diff cap exceeded (files changed).",
-                            )
-                        )
-                        bead_audits.append(
-                            {
-                                "bead_id": item.bead_id,
-                                "title": item.title,
-                                "outcome": "failed",
-                                "detail": "Diff cap exceeded (files changed).",
-                                "changed_paths": list(changed_paths),
-                                "diff_cap": {
-                                    "kind": "files_changed",
-                                    "files_changed": files_changed,
-                                    "lines_added": lines_added,
-                                    "tick_files_changed": tick_files_changed + files_changed,
-                                    "tick_lines_added": tick_lines_added,
-                                    "max_files_changed": config.diff_caps.max_files_changed,
-                                    "max_lines_added": config.diff_caps.max_lines_added,
-                                },
-                                "followups": list(followup_ids) if followup_ids else [],
-                            }
-                        )
-                        repo_failures.append(f"{item.bead_id}: diff cap exceeded (files changed).")
                         stop_reason = "blocked"
                         maybe_write_repo_report(branch=run_branch)
                         break
 
                     if tick_lines_added + lines_added > config.diff_caps.max_lines_added:
-                        cap_summary, followup_ids = _maybe_decompose_diff_cap_bead(
+                        _record_diff_cap_failure(
                             repo_root=repo_policy.path,
                             issue=issue,
                             item=item,
                             run_id=run_id,
                             attempt=attempt,
+                            audit_kind="lines_added",
                             cap_kind="lines added",
                             files_changed=files_changed,
                             lines_added=lines_added,
@@ -2492,69 +2556,13 @@ def execute_repo_tick(
                             max_files_changed=config.diff_caps.max_files_changed,
                             max_lines_added=config.diff_caps.max_lines_added,
                             changed_paths=changed_paths,
+                            deck_path=deck_path,
+                            replan=config.replan,
+                            bead_results=bead_results,
+                            bead_audits=bead_audits,
+                            repo_failures=repo_failures,
+                            follow_ups=follow_ups,
                         )
-                        extra_notes = ""
-                        if cap_summary:
-                            extra_notes += "\n" + cap_summary
-                        if followup_ids:
-                            extra_notes += (
-                                "\n"
-                                + _DECOMPOSE_MARKER
-                                + ": "
-                                + ", ".join(sorted(followup_ids))
-                            )
-                            follow_ups.append(
-                                f"Diff cap decomposition for {item.bead_id}: created "
-                                + ", ".join(sorted(followup_ids))
-                            )
-                            if deck_path is not None and not config.replan:
-                                try:
-                                    deck_path.unlink(missing_ok=True)
-                                    follow_ups.append(
-                                        f"Cleared run deck to force replan: {deck_path.as_posix()}"
-                                    )
-                                except OSError as e:
-                                    repo_failures.append(
-                                        f"{item.bead_id}: failed to clear run deck {deck_path}: {e}"
-                                    )
-                        _append_issue_failure_note(
-                            repo_root=repo_policy.path,
-                            issue_id=item.bead_id,
-                            status="blocked" if followup_ids else None,
-                            note="[orchestrator] Diff cap exceeded: "
-                            + f"tick_lines_added={tick_lines_added + lines_added} "
-                            + f"max={config.diff_caps.max_lines_added}"
-                            + extra_notes,
-                            reopen_closed=True,
-                        )
-                        bead_results.append(
-                            BeadResult(
-                                bead_id=item.bead_id,
-                                title=item.title,
-                                outcome="failed",
-                                detail="Diff cap exceeded (lines added).",
-                            )
-                        )
-                        bead_audits.append(
-                            {
-                                "bead_id": item.bead_id,
-                                "title": item.title,
-                                "outcome": "failed",
-                                "detail": "Diff cap exceeded (lines added).",
-                                "changed_paths": list(changed_paths),
-                                "diff_cap": {
-                                    "kind": "lines_added",
-                                    "files_changed": files_changed,
-                                    "lines_added": lines_added,
-                                    "tick_files_changed": tick_files_changed,
-                                    "tick_lines_added": tick_lines_added + lines_added,
-                                    "max_files_changed": config.diff_caps.max_files_changed,
-                                    "max_lines_added": config.diff_caps.max_lines_added,
-                                },
-                                "followups": list(followup_ids) if followup_ids else [],
-                            }
-                        )
-                        repo_failures.append(f"{item.bead_id}: diff cap exceeded (lines added).")
                         stop_reason = "blocked"
                         maybe_write_repo_report(branch=run_branch)
                         break
@@ -3107,16 +3115,10 @@ def execute_repo_tick(
     except RunLockError:
         emit("repo_skipped", reason="lock_busy")
         return finalize(
-            RepoTickResult(
+            _skip_repo_tick_result(
                 repo_id=repo_policy.repo_id,
                 run_id=run_id,
-                branch=None,
-                skipped=True,
                 skip_reason="lock_busy",
-                stop_reason=None,
-                beads_attempted=0,
-                beads_closed=0,
-                bead_results=(),
             )
         )
 

@@ -14,6 +14,7 @@ from codex_orchestrator.contract_overlays import load_contract_overlay
 from codex_orchestrator.contracts import ContractResolutionError, ResolvedExecutionContract, resolve_execution_contract
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.repo_inventory import RepoPolicy
+from codex_orchestrator.run_artifacts import read_json
 
 logger = logging.getLogger(__name__)
 
@@ -426,8 +427,7 @@ def write_run_deck(paths: OrchestratorPaths, *, deck: RunDeck) -> Path:
 
 def read_run_deck(path: Path) -> RunDeck:
     try:
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = read_json(path)
     except FileNotFoundError as e:
         raise PlannerError(f"Run deck not found: {path}") from e
     except json.JSONDecodeError as e:

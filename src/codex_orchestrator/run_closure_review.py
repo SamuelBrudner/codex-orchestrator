@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,11 @@ from codex_orchestrator.git_subprocess import (
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.planner import PlannerError, read_run_deck
 from codex_orchestrator.repo_inventory import RepoConfigError, load_repo_inventory
+from codex_orchestrator.run_artifacts import (
+    load_repo_ai_summaries,
+    load_repo_summaries_from_glob,
+    read_json_or_none,
+)
 
 
 class RunClosureReviewError(RuntimeError):
@@ -39,46 +43,6 @@ class CodexReviewLog:
     summary_md_path: Path | None = None
 
 
-def _read_json(path: Path) -> Any:
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return None
-    except json.JSONDecodeError as e:
-        raise RunClosureReviewError(f"Failed to parse JSON in {path}: {e}") from e
-    except OSError as e:
-        raise RunClosureReviewError(f"Failed to read {path}: {e}") from e
-
-
-def _load_repo_summaries(paths: OrchestratorPaths, *, run_id: str) -> list[dict[str, Any]]:
-    run_dir = paths.run_dir(run_id)
-    summaries: list[dict[str, Any]] = []
-    for summary_path in sorted(run_dir.glob("*.summary.json")):
-        payload = _read_json(summary_path)
-        if isinstance(payload, dict):
-            summaries.append(payload)
-    summaries.sort(key=lambda s: str(s.get("repo_id") or ""))
-    return summaries
-
-
-def _load_repo_ai_summaries(paths: OrchestratorPaths, *, run_id: str) -> dict[str, dict[str, Any]]:
-    run_dir = paths.run_dir(run_id)
-    summaries: dict[str, dict[str, Any]] = {}
-    for summary_path in sorted(run_dir.glob("*.ai_summary.json")):
-        payload = _read_json(summary_path)
-        if not isinstance(payload, dict):
-            continue
-        payload_run_id = payload.get("run_id")
-        repo_id = payload.get("repo_id")
-        if payload_run_id != run_id:
-            continue
-        if not isinstance(repo_id, str) or not repo_id.strip():
-            continue
-        summaries[repo_id.strip()] = payload
-    return summaries
-
-
 def _ensure_run_summary_with_final_review(
     paths: OrchestratorPaths,
     *,
@@ -87,12 +51,16 @@ def _ensure_run_summary_with_final_review(
     final_review_md: Path,
 ) -> None:
     run_summary_path = paths.run_summary_path(run_id)
-    payload = _read_json(run_summary_path)
+    payload = read_json_or_none(run_summary_path, error_type=RunClosureReviewError)
     if not isinstance(payload, dict):
-        payload = {"schema_version": 1, "run_id": run_id, "repos": _load_repo_summaries(paths, run_id=run_id)}
+        payload = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "repos": load_repo_summaries_from_glob(paths, run_id=run_id),
+        }
     payload.setdefault("schema_version", 1)
     payload.setdefault("run_id", run_id)
-    payload.setdefault("repos", _load_repo_summaries(paths, run_id=run_id))
+    payload.setdefault("repos", load_repo_summaries_from_glob(paths, run_id=run_id))
     payload["final_review"] = {
         "json_path": final_review_json.name,
         "md_path": final_review_md.name,
@@ -107,16 +75,16 @@ def build_final_review(
     ai_settings: AiSettings | None = None,
 ) -> dict[str, Any]:
     run_end_path = paths.run_end_path(run_id)
-    run_end = _read_json(run_end_path)
+    run_end = read_json_or_none(run_end_path, error_type=RunClosureReviewError)
     if not isinstance(run_end, dict):
         raise RunClosureReviewError(f"Missing run end marker: {run_end_path}")
 
-    run_meta = _read_json(paths.run_metadata_path(run_id))
+    run_meta = read_json_or_none(paths.run_metadata_path(run_id), error_type=RunClosureReviewError)
     if run_meta is not None and not isinstance(run_meta, dict):
         run_meta = None
 
-    repo_summaries = _load_repo_summaries(paths, run_id=run_id)
-    repo_ai_summaries = _load_repo_ai_summaries(paths, run_id=run_id)
+    repo_summaries = load_repo_summaries_from_glob(paths, run_id=run_id)
+    repo_ai_summaries = load_repo_ai_summaries(paths, run_id=run_id)
 
     repos_out: list[dict[str, Any]] = []
     total_attempted = 0
@@ -499,7 +467,7 @@ def run_review_only_codex_pass(
 
     logs: list[CodexReviewLog] = []
     dirty_ignore_by_repo = _load_dirty_ignore_globs(repo_config_path)
-    for summary in _load_repo_summaries(paths, run_id=run_id):
+    for summary in load_repo_summaries_from_glob(paths, run_id=run_id):
         repo_id = str(summary.get("repo_id") or "")
         if not repo_id:
             continue

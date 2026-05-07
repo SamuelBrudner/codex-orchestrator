@@ -4,7 +4,10 @@ import shutil
 import subprocess
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from functools import lru_cache
+from pathlib import Path
+
+from pathspec import PathSpec
 
 from codex_orchestrator.common_utils import dedupe_preserve_order
 
@@ -166,18 +169,15 @@ def _normalize_ignore_globs(ignore_globs: Sequence[str]) -> tuple[str, ...]:
     return tuple(out)
 
 
+@lru_cache(maxsize=128)
+def _compile_ignore_spec(ignore_globs: tuple[str, ...]) -> PathSpec:
+    return PathSpec.from_lines("gitwildmatch", ignore_globs)
+
+
 def _matches_ignore_glob(path: str, ignore_globs: Sequence[str]) -> bool:
     if not ignore_globs:
         return False
-    rel = PurePosixPath(path)
-    for pattern in ignore_globs:
-        if rel.match(pattern):
-            return True
-        if pattern.endswith("/**"):
-            base = pattern[:-3]
-            if base and rel.match(base):
-                return True
-    return False
+    return _compile_ignore_spec(tuple(ignore_globs)).match_file(path)
 
 
 def detect_dirty_ignore_globs(

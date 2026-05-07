@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -31,6 +30,7 @@ from codex_orchestrator.planner import (
 from codex_orchestrator.planning_audit import build_planning_audit, format_planning_audit_md
 from codex_orchestrator.planning_audit_issues import create_planning_audit_issues
 from codex_orchestrator.repo_inventory import RepoPolicy
+from codex_orchestrator.run_artifacts import read_json_object
 from codex_orchestrator.validation_runner import run_validation_commands
 
 logger = logging.getLogger(__name__)
@@ -50,17 +50,10 @@ class RepoDeckPlan:
 
 
 def _load_existing_created_issues(path: Path) -> list[dict[str, str]] | None:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-    except json.JSONDecodeError:
+    raw = read_json_object(path)
+    if raw is None:
         return None
 
-    if not isinstance(raw, dict):
-        return None
     created = raw.get("created_issues")
     if not isinstance(created, list):
         return None

@@ -45,6 +45,16 @@ def test_git_is_dirty_ignores_untracked_globs(tmp_path: Path) -> None:
     assert git_is_dirty(repo_root=repo_root, ignore_globs=(".pytest_cache/**",)) is False
 
 
+def test_git_is_dirty_uses_gitignore_style_basename_patterns(tmp_path: Path) -> None:
+    repo_root = _init_repo(tmp_path)
+    cache_dir = repo_root / "pkg" / "__pycache__"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "module.pyc").write_bytes(b"compiled")
+
+    assert git_is_dirty(repo_root=repo_root) is True
+    assert git_is_dirty(repo_root=repo_root, ignore_globs=("*.pyc",)) is False
+
+
 def test_git_remove_ignored_untracked_removes(tmp_path: Path) -> None:
     repo_root = _init_repo(tmp_path)
     cache_dir = repo_root / ".pytest_cache"

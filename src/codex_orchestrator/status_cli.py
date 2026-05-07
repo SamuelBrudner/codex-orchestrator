@@ -6,11 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from codex_orchestrator.paths import OrchestratorPaths, default_cache_dir
+from codex_orchestrator.run_artifacts import load_repo_summaries_from_glob, read_json
 from codex_orchestrator.run_lifecycle import RunLifecycleError, recover_orphaned_current_run
-
-
-def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _load_current_run_id(paths: OrchestratorPaths) -> str:
@@ -20,7 +17,7 @@ def _load_current_run_id(paths: OrchestratorPaths) -> str:
         raise SystemExit(f"codex-status: failed orphaned-run recovery: {e}") from e
 
     try:
-        data = _read_json(paths.current_run_path)
+        data = read_json(paths.current_run_path)
     except FileNotFoundError as e:
         raise SystemExit(
             f"codex-status: no active run found at {paths.current_run_path}; "
@@ -39,15 +36,7 @@ def _load_repo_summaries(paths: OrchestratorPaths, *, run_id: str) -> list[dict[
     run_dir = paths.run_dir(run_id)
     if not run_dir.exists():
         raise SystemExit(f"codex-status: run dir not found: {run_dir}")
-    summaries: list[dict[str, Any]] = []
-    for path in sorted(run_dir.glob("*.summary.json")):
-        try:
-            payload = _read_json(path)
-        except Exception:
-            continue
-        if isinstance(payload, dict):
-            summaries.append(payload)
-    return summaries
+    return load_repo_summaries_from_glob(paths, run_id=run_id)
 
 
 def _format_repo_line(summary: dict[str, Any]) -> str:

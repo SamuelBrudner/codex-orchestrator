@@ -124,6 +124,7 @@ def test_overlay_apply_writes_file_and_dry_run_ok(tmp_path: Path) -> None:
     overlay_path = tmp_path / "config" / "bead_contracts" / "test_repo.toml"
     assert overlay_path.exists()
     overlay_text = overlay_path.read_text(encoding="utf-8")
+    assert "# Contract overlay for `test_repo`." in overlay_text
     assert "[defaults]" in overlay_text
     assert "time_budget_minutes" in overlay_text
     assert "allow_env_creation" in overlay_text

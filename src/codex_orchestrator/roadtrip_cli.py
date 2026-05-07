@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -12,6 +11,7 @@ from pathlib import Path
 from codex_orchestrator.ai_policy import AiPolicyError, AiSettings, enforce_unattended_ai_policy, load_ai_settings
 from codex_orchestrator.orchestrator_cycle import OrchestratorCycleError, run_orchestrator_cycle
 from codex_orchestrator.paths import OrchestratorPaths, default_cache_dir
+from codex_orchestrator.run_artifacts import read_json
 from codex_orchestrator.run_closure_review import run_review_only_codex_pass, write_final_review
 from codex_orchestrator.run_lifecycle import RunLifecycleError, end_current_run
 from codex_orchestrator.run_lock import RunLock
@@ -74,7 +74,7 @@ def _maybe_end_stale_manual_run(paths: OrchestratorPaths) -> None:
     if not paths.current_run_path.exists():
         return
     try:
-        data = json.loads(paths.current_run_path.read_text(encoding="utf-8"))
+        data = read_json(paths.current_run_path)
     except Exception as e:
         raise SystemExit(f"codex-roadtrip: failed to read {paths.current_run_path}: {e}") from e
 
