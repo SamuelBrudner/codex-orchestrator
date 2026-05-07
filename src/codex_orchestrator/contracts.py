@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from codex_orchestrator.common_utils import dedupe_preserve_order
 from codex_orchestrator.contract_overlays import ContractOverlay
 from codex_orchestrator.repo_inventory import NotebookOutputPolicy, RepoPolicy
 
@@ -15,17 +16,6 @@ class ContractResolutionError(ValueError):
 
 class ContractParseError(ValueError):
     pass
-
-
-def _dedupe_preserve_order(items: Iterable[str]) -> tuple[str, ...]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        if item in seen:
-            continue
-        out.append(item)
-        seen.add(item)
-    return tuple(out)
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +193,7 @@ def resolve_execution_contract(
     per_bead_validation_commands: tuple[str, ...] = ()
     if per_bead is not None and per_bead.validation_commands is not None:
         per_bead_validation_commands = per_bead.validation_commands
-    validation_commands = _dedupe_preserve_order(
+    validation_commands = dedupe_preserve_order(
         list(repo_policy.validation_commands)
         + list(defaults.validation_commands or ())
         + list(per_bead_validation_commands)

@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from codex_orchestrator.env_bootstrap import (
-    BootstrapResult,
     bootstrap_repo_env,
 )
 

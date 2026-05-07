@@ -1,23 +1,12 @@
 from __future__ import annotations
 
-import shlex
 import subprocess
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
+from codex_orchestrator.common_utils import dedupe_preserve_order_list, parse_command_argv
 from codex_orchestrator.planner import ValidationResult
-
-
-def _dedupe_preserve_order(items: Sequence[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        if item in seen:
-            continue
-        out.append(item)
-        seen.add(item)
-    return out
 
 
 def _truncate(text: str, *, limit: int) -> str:
@@ -28,11 +17,7 @@ def _truncate(text: str, *, limit: int) -> str:
 
 
 def _parse_command_argv(command: str) -> list[str] | None:
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        return None
-    return argv or None
+    return parse_command_argv(command)
 
 
 def run_validation_commands(
@@ -44,7 +29,7 @@ def run_validation_commands(
     output_limit_chars: int = 20_000,
 ) -> dict[str, ValidationResult]:
     results: dict[str, ValidationResult] = {}
-    for command in _dedupe_preserve_order([c for c in commands if c.strip()]):
+    for command in dedupe_preserve_order_list([c for c in commands if c.strip()]):
         started_at = datetime.now().astimezone()
         argv = _parse_command_argv(command)
         if argv is None:

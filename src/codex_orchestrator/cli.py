@@ -47,6 +47,7 @@ from codex_orchestrator.run_signoff import (
     validate_run_signoff,
     write_run_signoff,
 )
+from codex_orchestrator.summary_utils import summary_int
 
 _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _DEFAULT_INIT_DENY_ROOTS: tuple[str, ...] = (
@@ -257,11 +258,7 @@ def _read_json_objects(path: Path, *, field: str) -> list[dict[str, Any]]:
 
 
 def _as_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return value
-    return 0
+    return summary_int(value)
 
 
 def _repo_status(summary: dict[str, Any]) -> str:

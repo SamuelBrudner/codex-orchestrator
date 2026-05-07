@@ -7,6 +7,7 @@ from codex_orchestrator.git_subprocess import (
     detect_dirty_ignore_globs,
     git_is_dirty,
     git_remove_ignored_untracked,
+    git_restore_tracked,
     git_status_filtered,
     resolve_dirty_ignore_globs,
 )
@@ -79,6 +80,35 @@ def test_git_status_filtered_ignores_tracked_globs(tmp_path: Path) -> None:
     issues.write_text("[{\"id\": \"bd-1\"}]\n", encoding="utf-8")
     status = git_status_filtered(repo_root=repo_root, ignore_globs=(".beads/**",))
     assert not any(entry.path == ".beads/issues.jsonl" for entry in status)
+
+
+def test_git_restore_tracked_restores_ignored_tracked_changes(tmp_path: Path) -> None:
+    repo_root = _init_repo(tmp_path)
+    beads_dir = repo_root / ".beads"
+    beads_dir.mkdir()
+    issues = beads_dir / "issues.jsonl"
+    issues.write_text('{"id": "bd-1"}\n', encoding="utf-8")
+    _git(repo_root, "add", ".beads/issues.jsonl")
+    _git(repo_root, "commit", "-m", "track beads")
+
+    issues.write_text('{"id": "bd-1", "status": "dirty"}\n', encoding="utf-8")
+    assert git_is_dirty(repo_root=repo_root) is True
+
+    restored = git_restore_tracked(repo_root=repo_root, ignore_globs=(".beads/**",))
+
+    assert restored == [".beads/issues.jsonl"]
+    assert issues.read_text(encoding="utf-8") == '{"id": "bd-1"}\n'
+    assert git_is_dirty(repo_root=repo_root) is False
+
+
+def test_git_restore_tracked_leaves_non_ignored_tracked_changes(tmp_path: Path) -> None:
+    repo_root = _init_repo(tmp_path)
+    (repo_root / "tracked.txt").write_text("changed\n", encoding="utf-8")
+
+    restored = git_restore_tracked(repo_root=repo_root, ignore_globs=(".beads/**",))
+
+    assert restored == []
+    assert (repo_root / "tracked.txt").read_text(encoding="utf-8") == "changed\n"
 
 
 def test_resolve_dirty_ignore_globs_includes_defaults(tmp_path: Path) -> None:

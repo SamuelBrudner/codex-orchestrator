@@ -4,6 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from codex_orchestrator.config_parsing import (
+    as_bool,
+    as_int,
+    as_rel_paths,
+    as_str,
+    as_str_list,
+    load_toml_table,
+)
 from codex_orchestrator.repo_inventory import RepoPolicy
 
 
@@ -12,89 +20,14 @@ class ContractOverlayError(ValueError):
 
 
 def _toml_load(path: Path) -> dict[str, Any]:
-    try:
-        import tomllib  # pyright: ignore[reportMissingImports]
-    except ModuleNotFoundError:  # pragma: no cover
-        import tomli as tomllib  # type: ignore[no-redef]
-
-    try:
-        with path.open("rb") as f:
-            data = tomllib.load(f)
-    except FileNotFoundError as e:
-        raise ContractOverlayError(f"Contract overlay not found: {path}") from e
-    except OSError as e:
-        raise ContractOverlayError(f"Failed to read contract overlay: {path}") from e
-    except Exception as e:  # tomllib.TOMLDecodeError is not public across tomli/tomllib
-        raise ContractOverlayError(f"Failed to parse TOML in {path}: {e}") from e
-
-    if not isinstance(data, dict):
-        raise ContractOverlayError(f"Expected TOML document to be a table in {path}")
-    return data
-
-
-def _as_str(value: Any, *, field: str, errors: list[str]) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        errors.append(f"{field}: expected string, got {type(value).__name__}")
-        return None
-    if not value.strip():
-        errors.append(f"{field}: must be non-empty")
-        return None
-    return value
-
-
-def _as_bool(value: Any, *, field: str, errors: list[str]) -> bool | None:
-    if value is None:
-        return None
-    if not isinstance(value, bool):
-        errors.append(f"{field}: expected bool, got {type(value).__name__}")
-        return None
-    return value
-
-
-def _as_int(value: Any, *, field: str, errors: list[str]) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        errors.append(f"{field}: expected int, got {type(value).__name__}")
-        return None
-    return value
-
-
-def _as_str_list(value: Any, *, field: str, errors: list[str]) -> list[str] | None:
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        errors.append(f"{field}: expected list[str], got {type(value).__name__}")
-        return None
-    out: list[str] = []
-    for idx, item in enumerate(value):
-        if not isinstance(item, str):
-            errors.append(f"{field}[{idx}]: expected string, got {type(item).__name__}")
-            continue
-        if not item.strip():
-            errors.append(f"{field}[{idx}]: must be non-empty")
-            continue
-        out.append(item)
-    return out
-
-
-def _as_rel_paths(value: Any, *, field: str, errors: list[str]) -> tuple[Path, ...] | None:
-    items = _as_str_list(value, field=field, errors=errors)
-    if items is None:
-        return None
-    out: list[Path] = []
-    for idx, item in enumerate(items):
-        p = Path(item)
-        if p.is_absolute():
-            errors.append(f"{field}[{idx}]: must be a relative path, got {item!r}")
-            continue
-        if ".." in p.parts:
-            errors.append(f"{field}[{idx}]: must not contain '..', got {item!r}")
-            continue
-        out.append(p)
-    return tuple(out)
+    return load_toml_table(
+        path,
+        error_type=ContractOverlayError,
+        missing_message="Contract overlay not found: {path}",
+        read_message="Failed to read contract overlay: {path}",
+        parse_message="Failed to parse TOML in {path}: {error}",
+        table_message="Expected TOML document to be a table in {path}",
+    )
 
 
 def _path_is_within(child: Path, parent: Path) -> bool:
@@ -153,7 +86,7 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
             f"{prefix}: unknown keys {sorted(unknown_fields)} (allowed: {sorted(known_fields)})"
         )
 
-    time_budget = _as_int(
+    time_budget = as_int(
         table.get("time_budget_minutes"),
         field=f"{prefix}.time_budget_minutes",
         errors=errors,
@@ -162,7 +95,7 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
         errors.append(f"{prefix}.time_budget_minutes: must be > 0, got {time_budget}")
         time_budget = None
 
-    validation_commands_raw = _as_str_list(
+    validation_commands_raw = as_str_list(
         table.get("validation_commands"),
         field=f"{prefix}.validation_commands",
         errors=errors,
@@ -171,26 +104,26 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
         tuple(validation_commands_raw) if validation_commands_raw is not None else None
     )
 
-    env = _as_str(table.get("env"), field=f"{prefix}.env", errors=errors)
-    allow_env_creation = _as_bool(
+    env = as_str(table.get("env"), field=f"{prefix}.env", errors=errors)
+    allow_env_creation = as_bool(
         table.get("allow_env_creation"), field=f"{prefix}.allow_env_creation", errors=errors
     )
-    requires_notebook_execution = _as_bool(
+    requires_notebook_execution = as_bool(
         table.get("requires_notebook_execution"),
         field=f"{prefix}.requires_notebook_execution",
         errors=errors,
     )
-    enforce_given_when_then = _as_bool(
+    enforce_given_when_then = as_bool(
         table.get("enforce_given_when_then"),
         field=f"{prefix}.enforce_given_when_then",
         errors=errors,
     )
-    enable_planning_audit_issue_creation = _as_bool(
+    enable_planning_audit_issue_creation = as_bool(
         table.get("enable_planning_audit_issue_creation"),
         field=f"{prefix}.enable_planning_audit_issue_creation",
         errors=errors,
     )
-    planning_audit_issue_limit = _as_int(
+    planning_audit_issue_limit = as_int(
         table.get("planning_audit_issue_limit"),
         field=f"{prefix}.planning_audit_issue_limit",
         errors=errors,
@@ -200,12 +133,12 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
             f"{prefix}.planning_audit_issue_limit: must be >= 0, got {planning_audit_issue_limit}"
         )
         planning_audit_issue_limit = None
-    enable_notebook_refactor_issue_creation = _as_bool(
+    enable_notebook_refactor_issue_creation = as_bool(
         table.get("enable_notebook_refactor_issue_creation"),
         field=f"{prefix}.enable_notebook_refactor_issue_creation",
         errors=errors,
     )
-    notebook_refactor_issue_limit = _as_int(
+    notebook_refactor_issue_limit = as_int(
         table.get("notebook_refactor_issue_limit"),
         field=f"{prefix}.notebook_refactor_issue_limit",
         errors=errors,
@@ -215,12 +148,12 @@ def _parse_patch(table: dict[str, Any], *, prefix: str, errors: list[str]) -> Co
             f"{prefix}.notebook_refactor_issue_limit: must be >= 0, got {notebook_refactor_issue_limit}"
         )
         notebook_refactor_issue_limit = None
-    allowed_roots = _as_rel_paths(
+    allowed_roots = as_rel_paths(
         table.get("allowed_roots"),
         field=f"{prefix}.allowed_roots",
         errors=errors,
     )
-    deny_roots = _as_rel_paths(
+    deny_roots = as_rel_paths(
         table.get("deny_roots"),
         field=f"{prefix}.deny_roots",
         errors=errors,

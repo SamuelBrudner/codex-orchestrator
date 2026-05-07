@@ -6,6 +6,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from codex_orchestrator.common_utils import dedupe_preserve_order
+
 
 class GitError(RuntimeError):
     pass
@@ -98,17 +100,6 @@ def _has_tracked_under(*, repo_root: Path, prefix: str) -> bool:
         return False
     completed = _run_git(["ls-files", "-z", "--", prefix], cwd=repo_root, check=True)
     return bool(completed.stdout)
-
-
-def _dedupe_preserve_order(items: Sequence[str]) -> tuple[str, ...]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        if item in seen:
-            continue
-        out.append(item)
-        seen.add(item)
-    return tuple(out)
 
 
 def git_remotes(*, repo_root: Path) -> list[str]:
@@ -206,7 +197,7 @@ def detect_dirty_ignore_globs(
         if prefix and _has_tracked_under(repo_root=repo_root, prefix=prefix):
             continue
         detected.append(pattern)
-    return _dedupe_preserve_order(detected)
+    return dedupe_preserve_order(detected)
 
 
 def resolve_dirty_ignore_globs(
@@ -216,7 +207,7 @@ def resolve_dirty_ignore_globs(
 ) -> DirtyIgnoreResolution:
     configured = _normalize_ignore_globs(configured)
     detected = detect_dirty_ignore_globs(repo_root=repo_root)
-    resolved = _dedupe_preserve_order(
+    resolved = dedupe_preserve_order(
         [*configured, *DEFAULT_DIRTY_IGNORE_GLOBS, *detected]
     )
     return DirtyIgnoreResolution(resolved=resolved, detected=detected)
@@ -272,6 +263,46 @@ def git_remove_ignored_untracked(
             raise GitError(f"Failed to remove ignored path {entry.path!r}: {e}") from e
         removed.append(entry.path)
     return removed
+
+
+def _safe_repo_relative_path(raw: str) -> Path | None:
+    rel = Path(raw)
+    if rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts:
+        return None
+    return rel
+
+
+def git_restore_tracked(
+    *,
+    repo_root: Path,
+    ignore_globs: Sequence[str],
+) -> list[str]:
+    ignore_globs = _normalize_ignore_globs(ignore_globs)
+    if not ignore_globs:
+        return []
+
+    restore_paths: list[str] = []
+    entries = git_status_porcelain(repo_root=repo_root)
+    for entry in entries:
+        if entry.xy == "??" or not entry.path:
+            continue
+        if "U" in entry.xy or "A" in entry.xy:
+            continue
+        candidates = [entry.path]
+        if entry.orig_path:
+            candidates.append(entry.orig_path)
+        if not any(_matches_ignore_glob(path, ignore_globs) for path in candidates):
+            continue
+        if _safe_repo_relative_path(entry.path) is None:
+            continue
+        restore_paths.append(entry.path)
+
+    restore_paths = list(dedupe_preserve_order(restore_paths))
+    if not restore_paths:
+        return []
+
+    _run_git(["restore", "--staged", "--worktree", "--", *restore_paths], cwd=repo_root, check=True)
+    return restore_paths
 
 
 def git_current_branch(*, repo_root: Path) -> str:

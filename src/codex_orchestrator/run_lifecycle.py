@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from codex_orchestrator.audit_trail import write_json_atomic
 from codex_orchestrator.night_window import DEFAULT_NIGHT_WINDOW
 from codex_orchestrator.paths import OrchestratorPaths
 from codex_orchestrator.run_lock import RunLock, RunLockError
@@ -47,22 +47,6 @@ def _generate_run_id(*, now: datetime) -> str:
 def _read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def _write_json_atomic(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        delete=False,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    ) as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-        f.write("\n")
-        tmp_name = f.name
-    os.replace(tmp_name, path)
 
 
 def _load_current_run_state(*, path: Path, now: datetime) -> CurrentRunState | None:
@@ -176,7 +160,7 @@ def _ensure_run_artifacts(paths: OrchestratorPaths, *, state: CurrentRunState) -
 
     metadata_path = paths.run_metadata_path(state.run_id)
     if not metadata_path.exists():
-        _write_json_atomic(metadata_path, state.to_json_dict())
+        write_json_atomic(metadata_path, state.to_json_dict())
 
     log_path = paths.run_log_path(state.run_id)
     if not log_path.exists():
@@ -192,7 +176,7 @@ def _append_run_log(paths: OrchestratorPaths, *, run_id: str, message: str) -> N
 
 def _end_run(paths: OrchestratorPaths, *, state: CurrentRunState, now: datetime, reason: str) -> None:
     end_path = paths.run_dir(state.run_id) / "run_end.json"
-    _write_json_atomic(
+    write_json_atomic(
         end_path,
         {"run_id": state.run_id, "ended_at": now.isoformat(), "reason": reason},
     )
@@ -336,7 +320,7 @@ def _tick_run_locked(
     )
 
     _ensure_run_artifacts(paths, state=state)
-    _write_json_atomic(paths.current_run_path, state.to_json_dict())
+    write_json_atomic(paths.current_run_path, state.to_json_dict())
     _append_run_log(
         paths,
         run_id=state.run_id,
@@ -448,7 +432,7 @@ def record_review(
         if state.beads_attempted_since_review == 0:
             return state
         updated = state.reset_review_counter()
-        _write_json_atomic(paths.current_run_path, updated.to_json_dict())
+        write_json_atomic(paths.current_run_path, updated.to_json_dict())
         _append_run_log(
             paths,
             run_id=run_id,
@@ -547,7 +531,7 @@ def ensure_active_run(
             beads_attempted_since_review=0,
         )
         _ensure_run_artifacts(paths, state=state)
-        _write_json_atomic(paths.current_run_path, state.to_json_dict())
+        write_json_atomic(paths.current_run_path, state.to_json_dict())
         _append_run_log(paths, run_id=state.run_id, message=f"{now.isoformat()} start_run mode={mode}")
         return TickResult(
             run_id=state.run_id,

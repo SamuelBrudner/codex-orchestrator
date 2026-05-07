@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from codex_orchestrator.ai_policy import AiSettings, codex_cli_args_for_settings
-from codex_orchestrator.audit_trail import write_json_atomic
+from codex_orchestrator.audit_trail import write_json_atomic, write_text_atomic
 from codex_orchestrator.codex_subprocess import codex_exec_full_auto
 from codex_orchestrator.git_subprocess import (
     GitError,
@@ -51,23 +49,6 @@ def _read_json(path: Path) -> Any:
         raise RunClosureReviewError(f"Failed to parse JSON in {path}: {e}") from e
     except OSError as e:
         raise RunClosureReviewError(f"Failed to read {path}: {e}") from e
-
-
-def _write_text_atomic(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        delete=False,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    ) as f:
-        f.write(content)
-        if not content.endswith("\n"):
-            f.write("\n")
-        tmp_name = f.name
-    os.replace(tmp_name, path)
 
 
 def _load_repo_summaries(paths: OrchestratorPaths, *, run_id: str) -> list[dict[str, Any]]:
@@ -397,7 +378,7 @@ def write_final_review(
     if force or not json_path.exists():
         write_json_atomic(json_path, review)
     if force or not md_path.exists():
-        _write_text_atomic(md_path, format_final_review_md(review))
+        write_text_atomic(md_path, format_final_review_md(review))
 
     _ensure_run_summary_with_final_review(
         paths,
@@ -613,7 +594,7 @@ def run_review_only_codex_pass(
                 "summary_markdown": summary_markdown,
             }
             write_json_atomic(summary_json_path, summary_payload)
-            _write_text_atomic(summary_md_path, _format_repo_ai_summary_md(summary_payload))
+            write_text_atomic(summary_md_path, _format_repo_ai_summary_md(summary_payload))
 
         logs[-1] = CodexReviewLog(
             repo_id=repo_id,

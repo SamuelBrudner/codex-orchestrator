@@ -13,6 +13,7 @@ from codex_orchestrator.beads_subprocess import (
     bd_show,
     bd_update,
 )
+from codex_orchestrator.common_utils import dedupe_preserve_order
 from codex_orchestrator.git_subprocess import git_status_porcelain
 from codex_orchestrator.repo_inventory import NotebookOutputPolicy
 
@@ -138,17 +139,9 @@ def _format_issue_title(notebook_path: str) -> str:
 
 
 def _dedupe_preserve_order(items: Iterable[str]) -> tuple[str, ...]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        value = str(item or "").strip()
-        if not value:
-            continue
-        if value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
-    return tuple(out)
+    return dedupe_preserve_order(
+        value for item in items if (value := str(item or "").strip())
+    )
 
 
 def _normalize_paths(paths: Sequence[str]) -> tuple[str, ...]:

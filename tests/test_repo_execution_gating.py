@@ -265,6 +265,54 @@ def test_tick_time_remaining_rule_prevents_start(tmp_path: Path, monkeypatch: py
     assert issues["bd-1"]["status"] == "open"
 
 
+def test_dirty_cleanup_restores_tracked_ignored_files_before_branching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_fake_tools(tmp_path, monkeypatch)
+    repo_root, policy = _setup_repo(tmp_path)
+    beads_dir = repo_root / ".beads"
+    beads_dir.mkdir()
+    issues = beads_dir / "issues.jsonl"
+    issues.write_text('{"id": "bd-1"}\n', encoding="utf-8")
+    _git(repo_root, "add", ".beads/issues.jsonl")
+    _git(repo_root, "commit", "-m", "track beads")
+    issues.write_text('{"id": "bd-1", "status": "dirty"}\n', encoding="utf-8")
+    policy = replace(policy, dirty_ignore_globs=(".beads/**",), dirty_cleanup=True)
+    _write_fake_issues(repo_root, ["bd-1"])
+
+    paths = OrchestratorPaths(cache_dir=tmp_path / "cache")
+    run_id = "20250101-000000-deadbeef"
+    _write_deck(paths, run_id=run_id, bead_ids=["bd-1"])
+
+    started_at = datetime.now().astimezone()
+    tick = TickBudget(started_at=started_at, ends_at=started_at + timedelta(minutes=10))
+    result = execute_repo_tick(
+        paths=paths,
+        run_id=run_id,
+        repo_policy=policy,
+        overlay_path=tmp_path / "unused_overlay.toml",
+        tick=tick,
+        config=RepoExecutionConfig(
+            tick_budget=timedelta(minutes=10),
+            min_minutes_to_start_new_bead=15,
+            max_beads_per_tick=3,
+            diff_caps=DiffCaps(max_files_changed=50, max_lines_added=500),
+        ),
+    )
+
+    assert result.skipped is False
+    assert result.stop_reason == "tick_time_remaining"
+    assert issues.read_text(encoding="utf-8") == '{"id": "bd-1"}\n'
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--", ".beads/issues.jsonl"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""
+
+
 def test_bead_cap_limits_attempts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _setup_fake_tools(tmp_path, monkeypatch)
     repo_root, policy = _setup_repo(tmp_path)

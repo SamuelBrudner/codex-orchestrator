@@ -3,7 +3,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
+
+from codex_orchestrator.config_parsing import (
+    as_bool,
+    as_rel_globs,
+    as_rel_paths,
+    as_str,
+    as_str_list,
+    load_toml_table,
+)
 
 NotebookOutputPolicy = Literal["keep", "strip"]
 
@@ -73,122 +82,6 @@ def _validate_orchestrator_outputs_policy(
             deny_roots=deny_roots,
             errors=errors,
         )
-
-
-def _toml_load(path: Path) -> dict[str, Any]:
-    try:
-        import tomllib  # pyright: ignore[reportMissingImports]
-    except ModuleNotFoundError:  # pragma: no cover
-        import tomli as tomllib  # type: ignore[no-redef]
-
-    try:
-        with path.open("rb") as f:
-            data = tomllib.load(f)
-    except FileNotFoundError as e:
-        raise RepoConfigError(f"Config file not found: {path}") from e
-    except OSError as e:
-        raise RepoConfigError(f"Failed to read config file: {path}") from e
-    except Exception as e:  # tomllib.TOMLDecodeError is not public across tomli/tomllib
-        raise RepoConfigError(f"Failed to parse TOML in {path}: {e}") from e
-
-    if not isinstance(data, dict):
-        raise RepoConfigError(f"Expected TOML document to be a table in {path}")
-    return data
-
-
-def _as_str(
-    value: Any,
-    *,
-    field: str,
-    errors: list[str],
-    required: bool = False,
-) -> str | None:
-    if value is None:
-        if required:
-            errors.append(f"{field}: required field missing")
-        return None
-    if not isinstance(value, str):
-        errors.append(f"{field}: expected string, got {type(value).__name__}")
-        return None
-    if not value.strip():
-        errors.append(f"{field}: must be non-empty")
-        return None
-    return value
-
-
-def _as_bool(value: Any, *, field: str, errors: list[str]) -> bool | None:
-    if value is None:
-        return None
-    if not isinstance(value, bool):
-        errors.append(f"{field}: expected bool, got {type(value).__name__}")
-        return None
-    return value
-
-
-def _as_str_list(value: Any, *, field: str, errors: list[str]) -> list[str] | None:
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        errors.append(f"{field}: expected list[str], got {type(value).__name__}")
-        return None
-    out: list[str] = []
-    for idx, item in enumerate(value):
-        if not isinstance(item, str):
-            errors.append(f"{field}[{idx}]: expected string, got {type(item).__name__}")
-            continue
-        if not item.strip():
-            errors.append(f"{field}[{idx}]: must be non-empty")
-            continue
-        out.append(item)
-    return out
-
-
-def _as_rel_globs(
-    value: Any,
-    *,
-    field: str,
-    default: tuple[str, ...],
-    errors: list[str],
-) -> tuple[str, ...]:
-    items = _as_str_list(value, field=field, errors=errors)
-    if items is None:
-        return default
-
-    out: list[str] = []
-    for idx, item in enumerate(items):
-        p = Path(item)
-        if p.is_absolute():
-            errors.append(f"{field}[{idx}]: must be a relative path glob, got {item!r}")
-            continue
-        if ".." in p.parts:
-            errors.append(f"{field}[{idx}]: must not contain '..', got {item!r}")
-            continue
-        out.append(item)
-    return tuple(out)
-
-
-def _as_rel_paths(
-    value: Any,
-    *,
-    field: str,
-    default: tuple[Path, ...],
-    errors: list[str],
-) -> tuple[Path, ...]:
-    items = _as_str_list(value, field=field, errors=errors)
-    if items is None:
-        return default
-
-    out: list[Path] = []
-    for idx, item in enumerate(items):
-        p = Path(item)
-        if p.is_absolute():
-            errors.append(f"{field}[{idx}]: must be a relative path, got {item!r}")
-            continue
-        if ".." in p.parts:
-            errors.append(f"{field}[{idx}]: must not contain '..', got {item!r}")
-            continue
-        out.append(p)
-    return tuple(out)
 
 
 def _validate_repo_groups(
@@ -277,7 +170,14 @@ class RepoInventory:
 
 
 def load_repo_inventory(config_path: Path) -> RepoInventory:
-    data = _toml_load(config_path)
+    data = load_toml_table(
+        config_path,
+        error_type=RepoConfigError,
+        missing_message="Config file not found: {path}",
+        read_message="Failed to read config file: {path}",
+        parse_message="Failed to parse TOML in {path}: {error}",
+        table_message="Expected TOML document to be a table in {path}",
+    )
 
     allowed_top_level = {"repos", "repo_groups"}
     unknown_top_level = set(data) - allowed_top_level
@@ -319,45 +219,45 @@ def load_repo_inventory(config_path: Path) -> RepoInventory:
                 f"(allowed: {sorted(known_fields)})"
             )
 
-        path_str = _as_str(
+        path_str = as_str(
             repo_data.get("path"),
             field=f"repos.{repo_id}.path",
             errors=errors,
             required=True,
         )
-        base_branch = _as_str(
+        base_branch = as_str(
             repo_data.get("base_branch"),
             field=f"repos.{repo_id}.base_branch",
             errors=errors,
             required=True,
         )
-        env = _as_str(repo_data.get("env"), field=f"repos.{repo_id}.env", errors=errors)
+        env = as_str(repo_data.get("env"), field=f"repos.{repo_id}.env", errors=errors)
 
-        notebook_roots = _as_rel_paths(
+        notebook_roots = as_rel_paths(
             repo_data.get("notebook_roots"),
             field=f"repos.{repo_id}.notebook_roots",
             default=(Path("."),),
             errors=errors,
         )
-        allowed_roots = _as_rel_paths(
+        allowed_roots = as_rel_paths(
             repo_data.get("allowed_roots"),
             field=f"repos.{repo_id}.allowed_roots",
             default=(Path("."),),
             errors=errors,
         )
-        deny_roots = _as_rel_paths(
+        deny_roots = as_rel_paths(
             repo_data.get("deny_roots"),
             field=f"repos.{repo_id}.deny_roots",
             default=(),
             errors=errors,
         )
-        dirty_ignore_globs = _as_rel_globs(
+        dirty_ignore_globs = as_rel_globs(
             repo_data.get("dirty_ignore_globs"),
             field=f"repos.{repo_id}.dirty_ignore_globs",
             default=(),
             errors=errors,
         )
-        dirty_cleanup = _as_bool(
+        dirty_cleanup = as_bool(
             repo_data.get("dirty_cleanup"),
             field=f"repos.{repo_id}.dirty_cleanup",
             errors=errors,
@@ -365,14 +265,14 @@ def load_repo_inventory(config_path: Path) -> RepoInventory:
         if dirty_cleanup is None:
             dirty_cleanup = False
 
-        validation_commands_raw = _as_str_list(
+        validation_commands_raw = as_str_list(
             repo_data.get("validation_commands"),
             field=f"repos.{repo_id}.validation_commands",
             errors=errors,
         )
         validation_commands: tuple[str, ...] = tuple(validation_commands_raw or ())
 
-        policy_raw = _as_str(
+        policy_raw = as_str(
             repo_data.get("notebook_output_policy"),
             field=f"repos.{repo_id}.notebook_output_policy",
             errors=errors,
@@ -429,7 +329,7 @@ def load_repo_inventory(config_path: Path) -> RepoInventory:
         )
     elif isinstance(repo_groups_table, dict):
         for group_name in sorted(repo_groups_table):
-            members = _as_str_list(
+            members = as_str_list(
                 repo_groups_table.get(group_name),
                 field=f"repo_groups.{group_name}",
                 errors=errors,

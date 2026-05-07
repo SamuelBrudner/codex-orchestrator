@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from codex_orchestrator.config_parsing import as_str, load_toml_table
 
 
 class AiPolicyError(ValueError):
@@ -22,43 +23,15 @@ class AiSettings:
         return {"model": self.model, "reasoning_effort": self.reasoning_effort}
 
 
-def _toml_load(path: Path) -> dict[str, Any]:
-    try:
-        import tomllib  # pyright: ignore[reportMissingImports]
-    except ModuleNotFoundError:  # pragma: no cover
-        import tomli as tomllib  # type: ignore[no-redef]
-
-    try:
-        with path.open("rb") as f:
-            data = tomllib.load(f)
-    except FileNotFoundError as e:
-        raise AiPolicyError(f"Config file not found: {path}") from e
-    except OSError as e:
-        raise AiPolicyError(f"Failed to read config file: {path}") from e
-    except Exception as e:  # tomllib.TOMLDecodeError is not public across tomli/tomllib
-        raise AiPolicyError(f"Failed to parse TOML in {path}: {e}") from e
-
-    if not isinstance(data, dict):
-        raise AiPolicyError(f"Expected TOML document to be a table in {path}")
-    return data
-
-
-def _as_str(value: Any, *, field: str, errors: list[str], required: bool = False) -> str | None:
-    if value is None:
-        if required:
-            errors.append(f"{field}: required field missing")
-        return None
-    if not isinstance(value, str):
-        errors.append(f"{field}: expected string, got {type(value).__name__}")
-        return None
-    if not value.strip():
-        errors.append(f"{field}: must be non-empty")
-        return None
-    return value
-
-
 def load_ai_settings(config_path: Path) -> AiSettings:
-    data = _toml_load(config_path)
+    data = load_toml_table(
+        config_path,
+        error_type=AiPolicyError,
+        missing_message="Config file not found: {path}",
+        read_message="Failed to read config file: {path}",
+        parse_message="Failed to parse TOML in {path}: {error}",
+        table_message="Expected TOML document to be a table in {path}",
+    )
     errors: list[str] = []
 
     allowed_top_level = {"ai"}
@@ -81,8 +54,8 @@ def load_ai_settings(config_path: Path) -> AiSettings:
             f"ai: unknown keys {sorted(unknown_ai_keys)} (allowed: {sorted(allowed_ai_keys)})"
         )
 
-    model = _as_str(ai_table.get("model"), field="ai.model", errors=errors, required=True)
-    reasoning_effort = _as_str(
+    model = as_str(ai_table.get("model"), field="ai.model", errors=errors, required=True)
+    reasoning_effort = as_str(
         ai_table.get("reasoning_effort"),
         field="ai.reasoning_effort",
         errors=errors,

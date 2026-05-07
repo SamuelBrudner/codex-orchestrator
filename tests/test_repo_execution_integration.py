@@ -406,6 +406,8 @@ def test_execute_repo_tick_closes_bead_and_updates_dependents(
     assert "avoid deep nesting" in codex_prompt
     assert "DataFrame.query" in codex_prompt
     assert "sns.someplot(data=df.query" in codex_prompt
+    assert "Codex edits files only" in codex_prompt
+    assert "The orchestrator owns all commits, Beads updates, and bead closure" in codex_prompt
 
     report_text = (repo_root / "docs" / "runs" / f"{run_id}.md").read_text(encoding="utf-8")
     assert "## Aims and Design Rationale" in report_text

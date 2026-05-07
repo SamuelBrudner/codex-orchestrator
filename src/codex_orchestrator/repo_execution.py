@@ -21,6 +21,7 @@ from codex_orchestrator.ai_policy import (
 )
 from codex_orchestrator.audit_trail import (
     append_jsonl,
+    append_log,
     collect_tool_versions,
     format_repo_run_report_md,
     write_json_atomic,
@@ -28,6 +29,7 @@ from codex_orchestrator.audit_trail import (
     write_text_atomic,
 )
 from codex_orchestrator.codex_subprocess import CodexCliError, codex_exec_full_auto
+from codex_orchestrator.common_utils import parse_command_argv, validation_status
 from codex_orchestrator.env_bootstrap import refresh_repo_env
 from codex_orchestrator.git_subprocess import (
     GitError,
@@ -44,6 +46,7 @@ from codex_orchestrator.git_subprocess import (
     git_remote_branch_exists,
     git_remotes,
     git_remove_ignored_untracked,
+    git_restore_tracked,
     git_rev_parse,
     git_stage_all,
     git_status_filtered,
@@ -55,6 +58,13 @@ from codex_orchestrator.planner import RunDeckItem, ValidationResult
 from codex_orchestrator.planning_pass import ensure_repo_run_deck
 from codex_orchestrator.repo_inventory import RepoPolicy
 from codex_orchestrator.run_lock import RunLock, RunLockError
+from codex_orchestrator.summary_utils import (
+    merge_records_by_keys,
+    merge_unique_strings,
+    summary_int,
+    summary_list_of_dicts,
+    summary_string_list,
+)
 from codex_orchestrator.validation_runner import run_validation_commands
 
 
@@ -191,11 +201,7 @@ def _require_tools(tools: Sequence[str]) -> None:
 
 
 def _parse_command_argv(command: str) -> list[str] | None:
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        return None
-    return argv or None
+    return parse_command_argv(command)
 
 
 def _validation_command_allowed(command: str) -> bool:
@@ -291,7 +297,9 @@ def _format_codex_prompt(
             f"- Allowed roots: {allowed_roots}",
             f"- Deny roots: {deny_roots}",
             "- Do not edit files outside allowed roots or under deny roots.",
-            "- Do not create git commits; the orchestrator will commit.",
+            "- Codex edits files only; do not stage, commit, amend, push, create PRs, "
+            "or change Beads status.",
+            "- The orchestrator owns all commits, Beads updates, and bead closure after validation.",
             "",
             "Validation commands (must pass to close):",
             validation,
@@ -757,10 +765,7 @@ def _validation_timeout_seconds(
     return max(1.0, min(float(configured_timeout_seconds), per_command_budget))
 
 
-def _append_log(path: Path, message: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(message.rstrip("\n") + "\n")
+_append_log = append_log
 
 
 def _write_text_if_missing(path: Path) -> None:
@@ -770,7 +775,7 @@ def _write_text_if_missing(path: Path) -> None:
 
 
 def _validation_status(exit_code: int) -> str:
-    return "ok" if exit_code == 0 else f"exit={exit_code}"
+    return validation_status(exit_code)
 
 
 def _bead_skip_for_issue_status(status: str) -> tuple[BeadOutcome, str] | None:
@@ -919,42 +924,19 @@ def _load_json_object(path: Path) -> dict[str, Any] | None:
 
 
 def _summary_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return value
-    return 0
+    return summary_int(value)
 
 
 def _summary_list_of_dicts(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [dict(item) for item in value if isinstance(item, dict)]
+    return summary_list_of_dicts(value)
 
 
 def _summary_string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    out: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        text = item.strip()
-        if text:
-            out.append(text)
-    return out
+    return summary_string_list(value)
 
 
 def _merge_unique_strings(*lists: list[str]) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for values in lists:
-        for value in values:
-            if value in seen:
-                continue
-            seen.add(value)
-            merged.append(value)
-    return merged
+    return merge_unique_strings(*lists)
 
 
 def _merge_records_by_keys(
@@ -963,30 +945,7 @@ def _merge_records_by_keys(
     *,
     key_fields: tuple[str, ...],
 ) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    index_by_key: dict[tuple[str, str], int] = {}
-
-    def _record_key(item: Mapping[str, Any]) -> tuple[str, str] | None:
-        for field in key_fields:
-            value = item.get(field)
-            if isinstance(value, str) and value.strip():
-                return (field, value.strip())
-        return None
-
-    for source in (existing, current):
-        for item in source:
-            record = dict(item)
-            record_key = _record_key(record)
-            if record_key is None:
-                merged.append(record)
-                continue
-            idx = index_by_key.get(record_key)
-            if idx is None:
-                index_by_key[record_key] = len(merged)
-                merged.append(record)
-                continue
-            merged[idx].update(record)
-    return merged
+    return merge_records_by_keys(existing, current, key_fields=key_fields)
 
 
 def _is_skipped_bead_outcome(value: Any) -> bool:
@@ -1386,6 +1345,66 @@ def _commit_failure_snapshot(
     body = f"RUN_ID: {run_id}\n\nFailure snapshot; bead did not close."
     git_stage_all(repo_root=repo_root)
     return git_commit(repo_root=repo_root, subject=subject, body=body)
+
+
+def _record_failed_bead(
+    bead_results: list[BeadResult],
+    bead_audits: list[dict[str, Any]],
+    *,
+    item: RunDeckItem,
+    detail: str,
+    changed_paths: Sequence[str] | None = None,
+    validation_results: Mapping[str, ValidationResult] | None = None,
+    extra_audit: Mapping[str, Any] | None = None,
+) -> None:
+    bead_results.append(
+        BeadResult(
+            bead_id=item.bead_id,
+            title=item.title,
+            outcome="failed",
+            detail=detail,
+        )
+    )
+    audit: dict[str, Any] = {
+        "bead_id": item.bead_id,
+        "title": item.title,
+        "outcome": "failed",
+        "detail": detail,
+    }
+    if changed_paths is not None:
+        audit["changed_paths"] = list(changed_paths)
+    if validation_results is not None:
+        audit["validation"] = {
+            cmd: _validation_status(r.exit_code) for cmd, r in validation_results.items()
+        }
+    if extra_audit is not None:
+        audit.update(dict(extra_audit))
+    bead_audits.append(audit)
+
+
+def _try_commit_run_report(
+    *,
+    repo_root: Path,
+    run_id: str,
+    repo_id: str,
+    run_report_path: Path | None,
+    was_clean_before_report: bool,
+    repo_failures: list[str],
+    body_detail: str,
+) -> bool:
+    if not was_clean_before_report or run_report_path is None:
+        return False
+    try:
+        git_stage_all(repo_root=repo_root)
+        git_commit(
+            repo_root=repo_root,
+            subject=f"run_report({run_id}): {repo_id}",
+            body=f"RUN_ID: {run_id}\n\n{body_detail}",
+        )
+    except GitError as commit_err:
+        repo_failures.append(f"Failed to commit run report: {commit_err}")
+        return False
+    return True
 
 
 def _ordered_remotes(remotes: Sequence[str]) -> list[str]:
@@ -1800,6 +1819,10 @@ def execute_repo_tick(
 
             if repo_policy.dirty_cleanup and dirty_ignore_globs:
                 try:
+                    restored_paths = git_restore_tracked(
+                        repo_root=repo_policy.path,
+                        ignore_globs=dirty_ignore_globs,
+                    )
                     removed_paths = git_remove_ignored_untracked(
                         repo_root=repo_policy.path,
                         ignore_globs=dirty_ignore_globs,
@@ -1811,6 +1834,12 @@ def execute_repo_tick(
                     )
                     emit("repo_dirty_cleanup_failed", error=str(e))
                 else:
+                    if restored_paths:
+                        _append_log(
+                            exec_log_path,
+                            f"{_now().isoformat()} dirty_cleanup_restored count={len(restored_paths)}",
+                        )
+                        emit("repo_dirty_cleanup_restored", restored=restored_paths)
                     if removed_paths:
                         _append_log(
                             exec_log_path,
@@ -1950,17 +1979,15 @@ def execute_repo_tick(
                     ignore_globs=dirty_ignore_globs,
                 )
                 maybe_write_repo_report(branch=run_branch)
-                if was_clean_before_report and run_report_path is not None:
-                    try:
-                        git_stage_all(repo_root=repo_policy.path)
-                        git_commit(
-                            repo_root=repo_policy.path,
-                            subject=f"run_report({run_id}): {repo_policy.repo_id}",
-                            body=f"RUN_ID: {run_id}\n\nPlanning failed; see docs/runs/{run_id}.md",
-                        )
-                        run_report_committed = True
-                    except GitError as commit_err:
-                        repo_failures.append(f"Failed to commit run report: {commit_err}")
+                run_report_committed = _try_commit_run_report(
+                    repo_root=repo_policy.path,
+                    run_id=run_id,
+                    repo_id=repo_policy.repo_id,
+                    run_report_path=run_report_path,
+                    was_clean_before_report=was_clean_before_report,
+                    repo_failures=repo_failures,
+                    body_detail=f"Planning failed; see docs/runs/{run_id}.md",
+                )
                 return finalize(
                     RepoTickResult(
                         repo_id=repo_policy.repo_id,
@@ -2134,20 +2161,29 @@ def execute_repo_tick(
                         argv=list(codex_argv),
                     )
 
+                    bead_id_for_callback = item.bead_id
+                    attempt_for_callback = attempt
+                    timeout_for_callback = timeout_seconds
+
                     def _on_codex_start(
-                        pid: int, argv: tuple[str, ...], started_at: datetime
+                        pid: int,
+                        argv: tuple[str, ...],
+                        started_at: datetime,
+                        bead_id: str = bead_id_for_callback,
+                        attempt_no: int = attempt_for_callback,
+                        timeout_limit: float = timeout_for_callback,
                     ) -> None:
                         nonlocal codex_pid, heartbeat_stop, heartbeat_thread
                         codex_pid = pid
                         _append_log(
                             log_path,
-                            f"{_now().isoformat()} codex_spawn bead_id={item.bead_id} "
-                            f"attempt={attempt} pid={pid}",
+                            f"{_now().isoformat()} codex_spawn bead_id={bead_id} "
+                            f"attempt={attempt_no} pid={pid}",
                         )
                         emit(
                             "codex_spawn",
-                            bead_id=item.bead_id,
-                            attempt=attempt,
+                            bead_id=bead_id,
+                            attempt=attempt_no,
                             pid=pid,
                             started_at=started_at.isoformat(),
                             argv=list(argv),
@@ -2161,33 +2197,33 @@ def execute_repo_tick(
                                 try:
                                     hb_now = _now()
                                     elapsed = (hb_now - started_at).total_seconds()
-                                    remaining_seconds = max(0.0, timeout_seconds - elapsed)
+                                    remaining_seconds = max(0.0, timeout_limit - elapsed)
                                     _append_log(
                                         log_path,
-                                        f"{hb_now.isoformat()} codex_heartbeat bead_id={item.bead_id} "
-                                        f"attempt={attempt} pid={pid} elapsed={elapsed:.0f}s "
+                                        f"{hb_now.isoformat()} codex_heartbeat bead_id={bead_id} "
+                                        f"attempt={attempt_no} pid={pid} elapsed={elapsed:.0f}s "
                                         f"remaining={remaining_seconds:.0f}s",
                                     )
                                     emit(
                                         "codex_heartbeat",
-                                        bead_id=item.bead_id,
-                                        attempt=attempt,
+                                        bead_id=bead_id,
+                                        attempt=attempt_no,
                                         pid=pid,
                                         elapsed_seconds=elapsed,
                                         remaining_seconds=remaining_seconds,
-                                        timeout_seconds=timeout_seconds,
+                                        timeout_seconds=timeout_limit,
                                     )
                                 except Exception as hb_err:
                                     _append_log(
                                         log_path,
-                                        f"{_now().isoformat()} codex_heartbeat_error bead_id={item.bead_id} "
-                                        f"attempt={attempt} pid={pid} error={type(hb_err).__name__}: {hb_err}",
+                                        f"{_now().isoformat()} codex_heartbeat_error bead_id={bead_id} "
+                                        f"attempt={attempt_no} pid={pid} error={type(hb_err).__name__}: {hb_err}",
                                     )
                                     break
 
                         t = threading.Thread(
                             target=_heartbeat,
-                            name=f"codex-heartbeat-{repo_policy.repo_id}-{item.bead_id}-{attempt}",
+                            name=f"codex-heartbeat-{repo_policy.repo_id}-{bead_id}-{attempt_no}",
                             daemon=True,
                         )
                         heartbeat_thread = t
@@ -2214,21 +2250,11 @@ def execute_repo_tick(
                             note=f"[orchestrator] codex invocation failed: {failure_error}",
                             reopen_closed=True,
                         )
-                        bead_results.append(
-                            BeadResult(
-                                bead_id=item.bead_id,
-                                title=item.title,
-                                outcome="failed",
-                                detail=failure_detail,
-                            )
-                        )
-                        bead_audits.append(
-                            {
-                                "bead_id": item.bead_id,
-                                "title": item.title,
-                                "outcome": "failed",
-                                "detail": failure_detail,
-                            }
+                        _record_failed_bead(
+                            bead_results,
+                            bead_audits,
+                            item=item,
+                            detail=failure_detail,
                         )
                         repo_failures.append(f"codex failed for {item.bead_id}: {failure_error}")
                         emit(
@@ -2245,17 +2271,15 @@ def execute_repo_tick(
                             ignore_globs=dirty_ignore_globs,
                         )
                         maybe_write_repo_report(branch=run_branch)
-                        if was_clean_before_report and run_report_path is not None:
-                            try:
-                                git_stage_all(repo_root=repo_policy.path)
-                                git_commit(
-                                    repo_root=repo_policy.path,
-                                    subject=f"run_report({run_id}): {repo_policy.repo_id}",
-                                    body=f"RUN_ID: {run_id}\n\nRun report: docs/runs/{run_id}.md",
-                                )
-                                run_report_committed = True
-                            except GitError as commit_err:
-                                repo_failures.append(f"Failed to commit run report: {commit_err}")
+                        run_report_committed = _try_commit_run_report(
+                            repo_root=repo_policy.path,
+                            run_id=run_id,
+                            repo_id=repo_policy.repo_id,
+                            run_report_path=run_report_path,
+                            was_clean_before_report=was_clean_before_report,
+                            repo_failures=repo_failures,
+                            body_detail=f"Run report: docs/runs/{run_id}.md",
+                        )
                         break
                     finally:
                         if heartbeat_stop is not None:
@@ -2321,22 +2345,12 @@ def execute_repo_tick(
                             "commit/close.",
                             reopen_closed=True,
                         )
-                        bead_results.append(
-                            BeadResult(
-                                bead_id=item.bead_id,
-                                title=item.title,
-                                outcome="failed",
-                                detail="No changes detected.",
-                            )
-                        )
-                        bead_audits.append(
-                            {
-                                "bead_id": item.bead_id,
-                                "title": item.title,
-                                "outcome": "failed",
-                                "detail": "No changes detected.",
-                                "changed_paths": list(changed_paths),
-                            }
+                        _record_failed_bead(
+                            bead_results,
+                            bead_audits,
+                            item=item,
+                            detail="No changes detected.",
+                            changed_paths=changed_paths,
                         )
                         repo_failures.append(f"{item.bead_id}: no changes detected after codex.")
                         stop_reason = "blocked"
@@ -2345,17 +2359,15 @@ def execute_repo_tick(
                             ignore_globs=dirty_ignore_globs,
                         )
                         maybe_write_repo_report(branch=run_branch)
-                        if was_clean_before_report and run_report_path is not None:
-                            try:
-                                git_stage_all(repo_root=repo_policy.path)
-                                git_commit(
-                                    repo_root=repo_policy.path,
-                                    subject=f"run_report({run_id}): {repo_policy.repo_id}",
-                                    body=f"RUN_ID: {run_id}\n\nRun report: docs/runs/{run_id}.md",
-                                )
-                                run_report_committed = True
-                            except GitError as commit_err:
-                                repo_failures.append(f"Failed to commit run report: {commit_err}")
+                        run_report_committed = _try_commit_run_report(
+                            repo_root=repo_policy.path,
+                            run_id=run_id,
+                            repo_id=repo_policy.repo_id,
+                            run_report_path=run_report_path,
+                            was_clean_before_report=was_clean_before_report,
+                            repo_failures=repo_failures,
+                            body_detail=f"Run report: docs/runs/{run_id}.md",
+                        )
                         break
 
                     try:
@@ -2371,22 +2383,12 @@ def execute_repo_tick(
                             note=f"[orchestrator] {e}",
                             reopen_closed=True,
                         )
-                        bead_results.append(
-                            BeadResult(
-                                bead_id=item.bead_id,
-                                title=item.title,
-                                outcome="failed",
-                                detail=str(e),
-                            )
-                        )
-                        bead_audits.append(
-                            {
-                                "bead_id": item.bead_id,
-                                "title": item.title,
-                                "outcome": "failed",
-                                "detail": str(e),
-                                "changed_paths": list(changed_paths),
-                            }
+                        _record_failed_bead(
+                            bead_results,
+                            bead_audits,
+                            item=item,
+                            detail=str(e),
+                            changed_paths=changed_paths,
                         )
                         repo_failures.append(f"{item.bead_id}: {e}")
                         stop_reason = "blocked"
@@ -2600,22 +2602,12 @@ def execute_repo_tick(
                                     note=f"[orchestrator] Env refresh failed: {refresh_result.error}",
                                     reopen_closed=True,
                                 )
-                                bead_results.append(
-                                    BeadResult(
-                                        bead_id=item.bead_id,
-                                        title=item.title,
-                                        outcome="failed",
-                                        detail=f"Env refresh failed: {refresh_result.error}",
-                                    )
-                                )
-                                bead_audits.append(
-                                    {
-                                        "bead_id": item.bead_id,
-                                        "title": item.title,
-                                        "outcome": "failed",
-                                        "detail": f"Env refresh failed: {refresh_result.error}",
-                                        "changed_paths": list(changed_paths),
-                                    }
+                                _record_failed_bead(
+                                    bead_results,
+                                    bead_audits,
+                                    item=item,
+                                    detail=f"Env refresh failed: {refresh_result.error}",
+                                    changed_paths=changed_paths,
                                 )
                                 repo_failures.append(
                                     f"{item.bead_id}: env refresh failed: {refresh_result.error}"
@@ -2635,22 +2627,12 @@ def execute_repo_tick(
                             note=f"[orchestrator] {e}",
                             reopen_closed=True,
                         )
-                        bead_results.append(
-                            BeadResult(
-                                bead_id=item.bead_id,
-                                title=item.title,
-                                outcome="failed",
-                                detail=str(e),
-                            )
-                        )
-                        bead_audits.append(
-                            {
-                                "bead_id": item.bead_id,
-                                "title": item.title,
-                                "outcome": "failed",
-                                "detail": str(e),
-                                "changed_paths": list(changed_paths),
-                            }
+                        _record_failed_bead(
+                            bead_results,
+                            bead_audits,
+                            item=item,
+                            detail=str(e),
+                            changed_paths=changed_paths,
                         )
                         repo_failures.append(f"{item.bead_id}: {e}")
                         stop_reason = "blocked"
@@ -2756,32 +2738,19 @@ def execute_repo_tick(
                                     + preflight_summary,
                                     reopen_closed=True,
                                 )
-                                bead_results.append(
-                                    BeadResult(
-                                        bead_id=item.bead_id,
-                                        title=item.title,
-                                        outcome="failed",
-                                        detail=detail,
-                                    )
-                                )
-                                bead_audits.append(
-                                    {
-                                        "bead_id": item.bead_id,
-                                        "title": item.title,
-                                        "outcome": "failed",
-                                        "detail": detail,
-                                        "changed_paths": list(changed_paths),
-                                        "validation": {
-                                            cmd: _validation_status(r.exit_code)
-                                            for cmd, r in validation_results.items()
-                                        },
+                                _record_failed_bead(
+                                    bead_results,
+                                    bead_audits,
+                                    item=item,
+                                    detail=detail,
+                                    changed_paths=changed_paths,
+                                    validation_results=validation_results,
+                                    extra_audit={
                                         "validation_env_preflight": {
                                             "check": _ENV_PREFLIGHT_NAME,
-                                            "status": _validation_status(
-                                                preflight_result.exit_code
-                                            ),
-                                        },
-                                    }
+                                            "status": _validation_status(preflight_result.exit_code),
+                                        }
+                                    },
                                 )
                                 repo_failures.append(
                                     f"{item.bead_id}: validation env preflight failed "
@@ -2866,27 +2835,14 @@ def execute_repo_tick(
                             + extra_notes,
                             reopen_closed=True,
                         )
-                        bead_results.append(
-                            BeadResult(
-                                bead_id=item.bead_id,
-                                title=item.title,
-                                outcome="failed",
-                                detail=detail,
-                            )
-                        )
-                        bead_audits.append(
-                            {
-                                "bead_id": item.bead_id,
-                                "title": item.title,
-                                "outcome": "failed",
-                                "detail": detail,
-                                "changed_paths": list(changed_paths),
-                                "validation": {
-                                    cmd: _validation_status(r.exit_code)
-                                    for cmd, r in validation_results.items()
-                                },
-                                "followups": list(followup_ids) if followup_ids else [],
-                            }
+                        _record_failed_bead(
+                            bead_results,
+                            bead_audits,
+                            item=item,
+                            detail=detail,
+                            changed_paths=changed_paths,
+                            validation_results=validation_results,
+                            extra_audit={"followups": list(followup_ids) if followup_ids else []},
                         )
                         stop_reason = "blocked"
                         maybe_write_repo_report(branch=run_branch)
@@ -2911,26 +2867,13 @@ def execute_repo_tick(
                         note="[orchestrator] No behavioral test command executed; cannot close.",
                         reopen_closed=True,
                     )
-                    bead_results.append(
-                        BeadResult(
-                            bead_id=item.bead_id,
-                            title=item.title,
-                            outcome="failed",
-                            detail="No behavioral test executed.",
-                        )
-                    )
-                    bead_audits.append(
-                        {
-                            "bead_id": item.bead_id,
-                            "title": item.title,
-                            "outcome": "failed",
-                            "detail": "No behavioral test executed.",
-                            "changed_paths": list(changed_paths),
-                            "validation": {
-                                cmd: _validation_status(r.exit_code)
-                                for cmd, r in validation_results.items()
-                            },
-                        }
+                    _record_failed_bead(
+                        bead_results,
+                        bead_audits,
+                        item=item,
+                        detail="No behavioral test executed.",
+                        changed_paths=changed_paths,
+                        validation_results=validation_results,
                     )
                     repo_failures.append(
                         f"{item.bead_id}: no behavioral test executed; cannot close."
@@ -2954,27 +2897,14 @@ def execute_repo_tick(
                             + formatted,
                             reopen_closed=True,
                         )
-                        bead_results.append(
-                            BeadResult(
-                                bead_id=item.bead_id,
-                                title=item.title,
-                                outcome="failed",
-                                detail="Given/When/Then markers missing in modified tests.",
-                            )
-                        )
-                        bead_audits.append(
-                            {
-                                "bead_id": item.bead_id,
-                                "title": item.title,
-                                "outcome": "failed",
-                                "detail": "Given/When/Then markers missing in modified tests.",
-                                "changed_paths": list(changed_paths),
-                                "gwt_missing_paths": missing_gwt,
-                                "validation": {
-                                    cmd: _validation_status(r.exit_code)
-                                    for cmd, r in validation_results.items()
-                                },
-                            }
+                        _record_failed_bead(
+                            bead_results,
+                            bead_audits,
+                            item=item,
+                            detail="Given/When/Then markers missing in modified tests.",
+                            changed_paths=changed_paths,
+                            validation_results=validation_results,
+                            extra_audit={"gwt_missing_paths": missing_gwt},
                         )
                         repo_failures.append(
                             f"{item.bead_id}: Given/When/Then markers missing in modified tests."
@@ -3151,17 +3081,15 @@ def execute_repo_tick(
             ):
                 if not run_report_committed:
                     maybe_write_repo_report(branch=run_branch)
-                    if run_report_path is not None:
-                        try:
-                            git_stage_all(repo_root=repo_policy.path)
-                            git_commit(
-                                repo_root=repo_policy.path,
-                                subject=f"run_report({run_id}): {repo_policy.repo_id}",
-                                body=f"RUN_ID: {run_id}\n\nRun report: docs/runs/{run_id}.md",
-                            )
-                            run_report_committed = True
-                        except GitError as commit_err:
-                            repo_failures.append(f"Failed to commit run report: {commit_err}")
+                    run_report_committed = _try_commit_run_report(
+                        repo_root=repo_policy.path,
+                        run_id=run_id,
+                        repo_id=repo_policy.repo_id,
+                        run_report_path=run_report_path,
+                        was_clean_before_report=True,
+                        repo_failures=repo_failures,
+                        body_detail=f"Run report: docs/runs/{run_id}.md",
+                    )
 
             return finalize(
                 RepoTickResult(

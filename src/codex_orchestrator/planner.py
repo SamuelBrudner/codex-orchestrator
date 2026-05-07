@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from codex_orchestrator.audit_trail import write_json_atomic
 from codex_orchestrator.contract_overlays import load_contract_overlay
 from codex_orchestrator.contracts import ContractResolutionError, ResolvedExecutionContract, resolve_execution_contract
 from codex_orchestrator.paths import OrchestratorPaths
@@ -415,29 +414,13 @@ def build_run_deck(
     )
 
 
-def _write_json_atomic(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        delete=False,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    ) as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-        f.write("\n")
-        tmp_name = f.name
-    os.replace(tmp_name, path)
-
-
 def write_run_deck(paths: OrchestratorPaths, *, deck: RunDeck) -> Path:
     out_path = paths.run_deck_path(
         deck.run_id,
         deck.repo_id,
         day=deck.created_at,
     )
-    _write_json_atomic(out_path, deck.to_json_dict())
+    write_json_atomic(out_path, deck.to_json_dict())
     return out_path
 
 
